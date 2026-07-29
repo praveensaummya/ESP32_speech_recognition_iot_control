@@ -69,13 +69,47 @@ esp_err_t bsp_get_feed_data(bool is_get_raw_channel, int16_t *buffer, int buffer
 {
     esp_err_t ret = ESP_OK;
     size_t bytes_read = 0;
+
+    int num_samples = buffer_len / sizeof(int16_t);
+    size_t read_bytes_32 = num_samples * sizeof(int32_t); // 32-bit I2S read size
+
+    static int32_t *i2s_32bit_buf = NULL;
+    static size_t i2s_32bit_buf_bytes = 0;
+
+    if (i2s_32bit_buf_bytes < read_bytes_32) {
+        if (i2s_32bit_buf) {
+            free(i2s_32bit_buf);
+        }
+        i2s_32bit_buf = (int32_t *)malloc(read_bytes_32);
+        if (i2s_32bit_buf) {
+            i2s_32bit_buf_bytes = read_bytes_32;
+        } else {
+            i2s_32bit_buf_bytes = 0;
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
-    ret = i2s_channel_read(rx_handle, (void *)buffer, buffer_len, &bytes_read, portMAX_DELAY);
+    ret = i2s_channel_read(rx_handle, (void *)i2s_32bit_buf, read_bytes_32, &bytes_read, portMAX_DELAY);
 #else
-    ret = i2s_read(I2S_NUM_1, (void *)buffer, buffer_len, &bytes_read, portMAX_DELAY);
+    ret = i2s_read(I2S_NUM_1, (void *)i2s_32bit_buf, read_bytes_32, &bytes_read, portMAX_DELAY);
 #endif
+
+    if (ret == ESP_OK && bytes_read > 0) {
+        int samples_read = bytes_read / sizeof(int32_t);
+        for (int i = 0; i < samples_read && i < num_samples; i++) {
+            // INMP441 outputs 24-bit audio inside a 32-bit slot.
+            // Shift right by 14 bits to convert to 16-bit PCM with clear gain scaling.
+            int32_t sample = i2s_32bit_buf[i] >> 14;
+            if (sample > 32767) sample = 32767;
+            if (sample < -32768) sample = -32768;
+            buffer[i] = (int16_t)sample;
+
+        }
+    }
     return ret;
 }
+
 
 int bsp_get_feed_channel(void) { return ADC_I2S_CHANNEL; }
 char* bsp_get_input_format(void) { return "MR"; }

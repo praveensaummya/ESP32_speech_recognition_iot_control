@@ -7,6 +7,8 @@
 */
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
+#include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -25,6 +27,63 @@ int wakeup_flag = 0;
 static const esp_afe_sr_iface_t *afe_handle = NULL;
 static volatile int task_flag = 0;
 srmodel_list_t *models = NULL;
+
+static void print_audio_stream_status(afe_fetch_result_t *res, int afe_chunksize, int wakeup_flag)
+{
+    static uint32_t frame_count = 0;
+    frame_count++;
+
+    // Check VAD (Voice Activity Detection) state change
+    static int prev_vad_state = -1;
+    int vad_state = res->vad_state;
+    bool vad_changed = (vad_state != prev_vad_state);
+    prev_vad_state = vad_state;
+
+    // Print status roughly every ~240ms (15 frames) or immediately when voice activity status changes
+    if (frame_count % 15 != 0 && !vad_changed) {
+        return;
+    }
+
+    // Calculate RMS energy & peak level from PCM 16-bit audio samples
+    int16_t *samples = (int16_t *)res->data;
+    int num_samples = res->data_size / sizeof(int16_t);
+    int64_t sum_sq = 0;
+    int16_t peak = 0;
+    for (int i = 0; i < num_samples; i++) {
+        int16_t s = samples[i];
+        if (abs(s) > peak) {
+            peak = abs(s);
+        }
+        sum_sq += (int32_t)s * s;
+    }
+    float rms = (num_samples > 0) ? sqrtf((float)sum_sq / num_samples) : 0.0f;
+
+    // Generate terminal VU meter bar [====------]
+    int vol_pct = (int)((rms / 4000.0f) * 100.0f);
+    if (vol_pct > 100) vol_pct = 100;
+
+    int bar_len = 10;
+    int filled = (vol_pct * bar_len) / 100;
+    char vu_bar[16];
+    int idx = 0;
+    vu_bar[idx++] = '[';
+    for (int i = 0; i < bar_len; i++) {
+        if (i < filled) {
+            vu_bar[idx++] = '=';
+        } else {
+            vu_bar[idx++] = '-';
+        }
+    }
+    vu_bar[idx++] = ']';
+    vu_bar[idx] = '\0';
+
+    const char *state_str = (wakeup_flag == 1) ? "\033[32m[LISTENING FOR COMMANDS]\033[0m" : "\033[33m[AWAITS WAKEWORD]\033[0m";
+    const char *vad_str = (vad_state == AFE_VAD_SPEECH) ? "\033[31mSPEECH DETECTED\033[0m" : "SILENCE        ";
+
+    printf("AUDIO STREAM | Level: %-12s (RMS:%4.0f, Peak:%5d) | VAD: %s | %s\n",
+           vu_bar, rms, peak, vad_str, state_str);
+    fflush(stdout);
+}
 
 void feed_Task(void *arg)
 {
@@ -73,10 +132,14 @@ void detect_Task(void *arg)
             break;
         }
 
+        print_audio_stream_status(res, afe_chunksize, wakeup_flag);
+
+
         if (res->wakeup_state == WAKENET_DETECTED) {
-            printf("WAKEWORD DETECTED\n");
+            printf("WAKEWORD DETECTED: HI ESP\n");
             fflush(stdout);
-	        multinet->clean(model_data);
+            multinet->clean(model_data);
+            wake_up_action();
         }
 
         if (res->raw_data_channels == 1 && res->wakeup_state == WAKENET_DETECTED) {
@@ -101,6 +164,9 @@ void detect_Task(void *arg)
                     i+1, mn_result->command_id[i], mn_result->phrase_id[i], mn_result->string, mn_result->prob[i]);
                     fflush(stdout);
                 }
+                if (mn_result->num > 0) {
+                    speech_commands_action(mn_result->command_id[0]);
+                }
                 printf("-----------listening-----------\n");
                 fflush(stdout);
             }
@@ -111,6 +177,7 @@ void detect_Task(void *arg)
                 fflush(stdout);
                 afe_handle->enable_wakenet(afe_data);
                 wakeup_flag = 0;
+                led_set_off();
                 printf("\n-----------awaits to be waken up-----------\n");
                 fflush(stdout);
                 continue;
@@ -129,6 +196,7 @@ void app_main()
 {
     models = esp_srmodel_init("model"); // partition label defined in partitions.csv
     ESP_ERROR_CHECK(esp_board_init(16000, 2, 16));
+    led_init(); // Initialize built-in WS2812 Pixel LED
     // ESP_ERROR_CHECK(esp_sdcard_init("/sdcard", 10));
 
 #if CONFIG_IDF_TARGET_ESP32
@@ -145,3 +213,4 @@ void app_main()
     xTaskCreatePinnedToCore(&detect_Task, "detect", 8 * 1024, (void*)afe_data, 5, NULL, 1);
     xTaskCreatePinnedToCore(&feed_Task, "feed", 8 * 1024, (void*)afe_data, 5, NULL, 0);
 }
+

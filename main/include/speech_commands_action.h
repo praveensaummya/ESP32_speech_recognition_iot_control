@@ -8,9 +8,16 @@
 #ifndef _SPEECH_COMMANDS_ACTION_H_
 #define _SPEECH_COMMANDS_ACTION_H_
 
-void led_Task(void *arg);
+#include <stdint.h>
+
+/* Built-in Pixel WS2812 LED control */
+void led_init(void);
+void led_set_color(uint8_t red, uint8_t green, uint8_t blue);
+void led_set_blue(void);
+void led_set_green(void);
+void led_set_off(void);
 
 void speech_commands_action(int command_id);
-
 void wake_up_action(void);
+
 #endif

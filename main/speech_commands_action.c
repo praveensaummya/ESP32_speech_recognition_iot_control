@@ -55,53 +55,66 @@ typedef struct {
     int length;
 } dac_audio_item_t;
 
-#if defined CONFIG_ESP32_S3_KORVO_1_V4_0_BOARD
 #include "led_strip.h"
-#define EXAMPLE_CHASE_SPEED_MS (10)
-led_strip_handle_t strip = NULL;
-void led_Task(void *arg)
+
+// Default built-in WS2812 RGB LED pin on ESP32-S3 DevKit boards (GPIO 48)
+// Modify BUILTIN_PIXEL_LED_GPIO below if your specific board uses another pin (e.g. 21, 38, or 19)
+#ifndef BUILTIN_PIXEL_LED_GPIO
+#define BUILTIN_PIXEL_LED_GPIO 48
+#endif
+
+static led_strip_handle_t s_led_strip = NULL;
+
+void led_init(void)
 {
-    const led_strip_config_t led_config = {
-        .strip_gpio_num = 19,
-        .max_leds = 12,
+    if (s_led_strip != NULL) {
+        return;
+    }
+    led_strip_config_t strip_config = {
+        .strip_gpio_num = BUILTIN_PIXEL_LED_GPIO,
+        .max_leds = 1,
         .led_pixel_format = LED_PIXEL_FORMAT_GRB,
         .led_model = LED_MODEL_WS2812,
+        .flags.invert_out = false,
     };
-    const led_strip_rmt_config_t rmt_config = {}; // default
-    led_strip_new_rmt_device(&led_config, &rmt_config, &strip);
-    if (!strip) {
-        printf("install WS2812 driver failed\n");
-    }
-    // Clear LED strip (turn off all LEDs)
-    ESP_ERROR_CHECK(led_strip_clear(strip));
-    for (int j = 0; j < 12; j += 1) {
-        ESP_ERROR_CHECK(led_strip_set_pixel(strip, j, 50, 50, 50));
-    }
-    // Flush RGB values to LEDs
-    ESP_ERROR_CHECK(led_strip_refresh(strip));
-    while (1) {
-        for (int i = 0; i < 100; i++) {
-            for (int j = 0; j < 12; j += 1) {
-                // Build RGB values
-                ESP_ERROR_CHECK(led_strip_set_pixel(strip, j, 100 * detect_flag, 0.5 * i * 0, 0.5 * i * (1 - detect_flag)));
-                // Flush RGB values to LEDs
-                ESP_ERROR_CHECK(led_strip_refresh(strip));
-            }
-            vTaskDelay(pdMS_TO_TICKS(EXAMPLE_CHASE_SPEED_MS));
-        }
-
-        for (int i = 100; i > 0; i--) {
-            for (int j = 0; j < 12; j += 1) {
-                // Build RGB values
-                ESP_ERROR_CHECK(led_strip_set_pixel(strip, j, 100 * detect_flag, 0.5 * i * 0, 0.5 * i * (1 - detect_flag)));
-                ESP_ERROR_CHECK(led_strip_refresh(strip));
-            }
-            vTaskDelay(pdMS_TO_TICKS(EXAMPLE_CHASE_SPEED_MS));
-        }
-        vTaskDelay(pdMS_TO_TICKS(EXAMPLE_CHASE_SPEED_MS));
+    led_strip_rmt_config_t rmt_config = {
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz = 10 * 1000 * 1000,
+        .flags.with_dma = false,
+    };
+    esp_err_t ret = led_strip_new_rmt_device(&strip_config, &rmt_config, &s_led_strip);
+    if (ret == ESP_OK && s_led_strip) {
+        led_strip_clear(s_led_strip);
+        printf("[LED] Built-in WS2812 Pixel LED initialized on GPIO %d\n", BUILTIN_PIXEL_LED_GPIO);
+    } else {
+        printf("[LED] Failed to initialize WS2812 LED on GPIO %d (err: 0x%x)\n", BUILTIN_PIXEL_LED_GPIO, ret);
     }
 }
-#endif
+
+void led_set_color(uint8_t red, uint8_t green, uint8_t blue)
+{
+    if (s_led_strip) {
+        led_strip_set_pixel(s_led_strip, 0, red, green, blue);
+        led_strip_refresh(s_led_strip);
+    }
+}
+
+void led_set_blue(void)
+{
+    led_set_color(0, 0, 255);
+}
+
+void led_set_green(void)
+{
+    led_set_color(0, 255, 0);
+}
+
+void led_set_off(void)
+{
+    if (s_led_strip) {
+        led_strip_clear(s_led_strip);
+    }
+}
 
 dac_audio_item_t playlist[] = {
     // {"ie_kaiji.h", (uint16_t*)ie_kaiji, sizeof(ie_kaiji)},
@@ -142,10 +155,16 @@ dac_audio_item_t playlist[] = {
 
 void wake_up_action(void)
 {
+    printf("[WAKE] 'HI ESP' detected -> Pixel LED turning BLUE!\n");
+    led_set_blue();
     esp_audio_play((int16_t *)(playlist[0].data), playlist[0].length, portMAX_DELAY);
 }
 
 void speech_commands_action(int command_id)
 {
-    esp_audio_play((int16_t *)(playlist[command_id + 1].data), playlist[command_id + 1].length, portMAX_DELAY);
+    printf("[COMMAND] Command ID %d recognized -> Pixel LED turning GREEN!\n", command_id);
+    led_set_green();
+    if (command_id >= 0 && command_id < (sizeof(playlist) / sizeof(playlist[0]) - 1)) {
+        esp_audio_play((int16_t *)(playlist[command_id + 1].data), playlist[command_id + 1].length, portMAX_DELAY);
+    }
 }

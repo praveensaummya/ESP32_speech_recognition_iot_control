@@ -1,11 +1,8 @@
 # English Speech Commands Recognition
 
-
-
 (See the [README.md](../README.md) file in the upper level 'examples' directory for more information about examples.)
 
 ## How to use this example
-
 
 ### Additional Hardware Required
 
@@ -13,8 +10,7 @@
 
 ### Configure, Build and Flash
 
-
-##### set-target 
+##### set-target
 
 ```
 idf.py set-target esp32s3
@@ -24,7 +20,7 @@ idf.py set-target esp32s3
 
 Select the default sdkconfig according to the development board module
 
-For example:  
+For example:
 
 ```
 cp sdkconfig.defaults.esp32s3 sdkconfig
@@ -35,15 +31,15 @@ cp sdkconfig.defaults.esp32s3 sdkconfig
 Build the project and flash it to the board, then run the monitor tool to view the output via serial port:
 
 ```
-idf.py -b 2000000 flash monitor 
+idf.py -b 2000000 flash monitor
 ```
 
 (To exit the serial monitor, type ``Ctrl-]``.)
 
 ### Modify speech commands
 
-We recommend using MultiNet6 or newer models.   
-Here's a simple example to modify speech commands in the code.  
+We recommend using MultiNet6 or newer models.
+Here's a simple example to modify speech commands in the code.
 You can also modify the default command list, please refer to [document](https://docs.espressif.com/projects/esp-sr/en/latest/esp32s3/speech_command_recognition/README.html) for more details.
 
 ```
@@ -56,3 +52,5 @@ You can also modify the default command list, please refer to [document](https:/
     esp_mn_commands_update();                      // update commands
     multinet->print_active_speech_commands(model_data);     // print active commands
 ```
+
+**for activating  idf enviroment  :- source /home/rouger/.espressif/v5.2.7/esp-idf/export.sh**
