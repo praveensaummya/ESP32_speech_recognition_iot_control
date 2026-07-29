@@ -1,0 +1,14 @@
+menu "Audio Media HAL"
+
+choice AUDIO_BOARD
+    prompt "Audio hardware board"
+    default ESP_CUSTOM_BOARD
+    help
+        Select an audio board to use
+
+config ESP_CUSTOM_BOARD
+    bool "Custom-Board (INMP441)"
+    depends on IDF_TARGET_ESP32S3
+endchoice
+
+endmenu
