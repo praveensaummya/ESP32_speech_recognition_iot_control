@@ -97,22 +97,28 @@ esp_err_t bsp_get_feed_data(bool is_get_raw_channel, int16_t *buffer, int buffer
 
     if (ret == ESP_OK && bytes_read > 0) {
         int samples_read = bytes_read / sizeof(int32_t);
-        for (int i = 0; i < samples_read && i < num_samples; i++) {
-            // INMP441 outputs 24-bit audio inside a 32-bit slot.
-            // Shift right by 14 bits to convert to 16-bit PCM with clear gain scaling.
-            int32_t sample = i2s_32bit_buf[i] >> 14;
-            if (sample > 32767) sample = 32767;
-            if (sample < -32768) sample = -32768;
-            buffer[i] = (int16_t)sample;
+        for (int i = 0; i < samples_read && i < num_samples; i += 2) {
+            // L/R pin connected to GND -> Audio is on LEFT channel (i2s_32bit_buf[i])
+            int32_t left_sample = i2s_32bit_buf[i] >> 14;
 
+            if (left_sample > 32767) left_sample = 32767;
+            if (left_sample < -32768) left_sample = -32768;
+
+            int16_t mic_pcm = (int16_t)left_sample;
+
+            // Fill Left channel (active mic) and mirror to Right channel
+            buffer[i] = mic_pcm;
+            if (i + 1 < num_samples) {
+                buffer[i + 1] = mic_pcm;
+            }
         }
     }
     return ret;
 }
 
-
 int bsp_get_feed_channel(void) { return ADC_I2S_CHANNEL; }
-char* bsp_get_input_format(void) { return "MR"; }
+char* bsp_get_input_format(void) { return "ML"; }
+
 
 esp_err_t bsp_board_init(uint32_t sample_rate, int channel_format, int bits_per_chan)
 {
