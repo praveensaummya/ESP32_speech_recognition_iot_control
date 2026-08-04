@@ -5,6 +5,7 @@ set(srcs
 
 set(requires
     hardware_driver
+    esp-wifi-manager
     )
 
 idf_component_register(SRCS ${srcs}

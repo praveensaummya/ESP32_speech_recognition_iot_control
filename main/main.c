@@ -17,6 +17,33 @@
 #include "model_path.h"
 #include "esp_process_sdkconfig.h"
 
+#include <string.h>
+#include "esp_wifi.h"
+#include "esp_netif.h"
+#include "esp_system.h"
+#include "esp_log.h"
+#include "nvs_flash.h"
+#include "nvs.h"
+
+
+#include "wifi_manager.h"
+/* @brief tag used for ESP serial console messages */
+static const char TAG[] = "main";
+
+/**
+ * @brief this is an exemple of a callback that you can setup in your own app to get notified of wifi manager event.
+ */
+void cb_connection_ok(void *pvParameter){
+	ip_event_got_ip_t* param = (ip_event_got_ip_t*)pvParameter;
+
+	/* transform IP to human readable string */
+	char str_ip[16];
+	esp_ip4addr_ntoa(&param->ip_info.ip, str_ip, IP4ADDR_STRLEN_MAX);
+
+	ESP_LOGI(TAG, "I have a connection and my IP is %s!", str_ip);
+}
+
+
 int wakeup_flag = 0;
 static const esp_afe_sr_iface_t *afe_handle = NULL;
 static volatile int task_flag = 0;
@@ -188,9 +215,31 @@ void detect_Task(void *arg)
 
 void app_main()
 {
+    // Initialize NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND){
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+    // Initialize esp_netif (required for Wi-Fi in IDF v5.x)
+    ESP_ERROR_CHECK(esp_netif_init());
+    
+    esp_err_t err = esp_event_loop_create_default();
+    if(err != ESP_OK && err != ESP_ERR_INVALID_STATE){
+        ESP_ERROR_CHECK(err);
+    }
+    // Start Wi-Fi Manager AFTER NVS and netif are ready
+    wifi_manager_start();
+
+    wifi_manager_set_callback(WM_EVENT_STA_GOT_IP, &cb_connection_ok);
+    //voice recognition models
     models = esp_srmodel_init("model"); // partition label defined in partitions.csv
     ESP_ERROR_CHECK(esp_board_init(16000, 2, 16));
     led_init(); // Initialize built-in WS2812 Pixel LED
+
+
+
     // ESP_ERROR_CHECK(esp_sdcard_init("/sdcard", 10));
 
 #if CONFIG_IDF_TARGET_ESP32
