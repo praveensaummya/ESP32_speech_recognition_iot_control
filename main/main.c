@@ -133,13 +133,27 @@ void detect_Task(void *arg)
     esp_afe_sr_data_t *afe_data = arg;
     int afe_chunksize = afe_handle->get_fetch_chunksize(afe_data);
     char *mn_name = esp_srmodel_filter(models, ESP_MN_PREFIX, ESP_MN_ENGLISH);
+
     printf("multinet:%s\n", mn_name);
     fflush(stdout);
+
     esp_mn_iface_t *multinet = esp_mn_handle_from_name(mn_name);
     model_iface_data_t *model_data = multinet->create(mn_name, 6000);
     int mu_chunksize = multinet->get_samp_chunksize(model_data);
+
     esp_mn_commands_update_from_sdkconfig(multinet, model_data); // Add speech commands from sdkconfig
     assert(mu_chunksize == afe_chunksize);
+
+
+    esp_mn_commands_clear();
+
+    esp_mn_commands_add(1,"relay one on");
+    esp_mn_commands_add(2,"relay one off");
+    esp_mn_commands_add(3,"relay two on");
+    esp_mn_commands_add(4,"relay two off");
+
+    esp_mn_commands_update();
+
     //print active speech commands
     multinet->print_active_speech_commands(model_data);
     fflush(stdout);
@@ -159,13 +173,13 @@ void detect_Task(void *arg)
         if (res->wakeup_state == WAKENET_DETECTED) {
             printf("WAKEWORD DETECTED: HI ESP\n");
             fflush(stdout);
-            multinet->clean(model_data);
             wake_up_action();
         }
 
         if (res->raw_data_channels == 1 && res->wakeup_state == WAKENET_DETECTED) {
             wakeup_flag = 1;
         } else if (res->raw_data_channels > 1 && res->wakeup_state == WAKENET_CHANNEL_VERIFIED) {
+
             // For a multi-channel AFE, it is necessary to wait for the channel to be verified.
             printf("AFE_FETCH_CHANNEL_VERIFIED, channel index: %d\n", res->trigger_channel_id);
             wakeup_flag = 1;
@@ -212,6 +226,7 @@ void detect_Task(void *arg)
     printf("detect exit\n");
     vTaskDelete(NULL);
 }
+
 
 void app_main()
 {

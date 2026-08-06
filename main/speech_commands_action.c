@@ -10,17 +10,16 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "driver/gpio.h"
 
-#include "me_tell_me_a_joke.h"
-#include "me_sing_a_song.h"
-#include "me_highest_volume.h"
-#include "me_lowest_volume.h"
-#include "me_increase_volume.h"
-#include "me_decrease_the_volume.h"
+
 
 #include "esp_board_init.h"
 #include "wake_up_prompt_tone.h"
 #include "speech_commands_action.h"
+
+#define RELAY_1_GPIO GPIO_NUM_4
+#define RELAY_2_GPIO GPIO_NUM_5
 
 extern int detect_flag;
 
@@ -36,12 +35,28 @@ typedef struct {
 // Modify BUILTIN_PIXEL_LED_GPIO below if your specific board uses another pin (e.g. 21, 38, or 19)
 #ifndef BUILTIN_PIXEL_LED_GPIO
 #define BUILTIN_PIXEL_LED_GPIO 48
+
 #endif
 
 static led_strip_handle_t s_led_strip = NULL;
 
+//initilize GPIOs for Relays
+static void relay_gpio_init(void){
+    gpio_config_t io_conf = {
+        .pin_bit_mask =(1ULL <<RELAY_1_GPIO) | (1ULL<<RELAY_2_GPIO),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io_conf);
+    //set gpios initilization at 0
+    gpio_set_level(RELAY_1_GPIO, 0);
+    gpio_set_level(RELAY_2_GPIO, 0);
+}
+
 void led_init(void)
-{
+{   relay_gpio_init();
     if (s_led_strip != NULL) {
         return;
     }
@@ -91,17 +106,9 @@ void led_set_off(void)
     }
 }
 
-dac_audio_item_t playlist[] = {
-    // {"ie_kaiji.h", (uint16_t*)ie_kaiji, sizeof(ie_kaiji)},
-    {"wake_up_prompt_tone", (uint16_t*)wake_up_prompt_tone, sizeof(wake_up_prompt_tone)},
-    {"me_tell_me_a_joke", (uint16_t*)me_tell_me_a_joke, sizeof(me_tell_me_a_joke)},
-    {"me_sing_a_song", (uint16_t*)me_sing_a_song, sizeof(me_sing_a_song)},
-    {"me_highest_volume", (uint16_t*)me_highest_volume, sizeof(me_highest_volume)},
-    {"me_lowest_volume", (uint16_t*)me_lowest_volume, sizeof(me_lowest_volume)},
-    {"me_increase_volume", (uint16_t*)me_increase_volume, sizeof(me_increase_volume)},
-    {"me_decrease_the_volume", (uint16_t*)me_decrease_the_volume, sizeof(me_decrease_the_volume)},
 
-};
+
+
 
 void wake_up_action(void)
 {
@@ -114,7 +121,27 @@ void speech_commands_action(int command_id)
 {
     printf("[COMMAND] Command ID %d recognized -> Pixel LED turning GREEN!\n", command_id);
     led_set_green();
-    if (command_id >= 0 && command_id < (sizeof(playlist) / sizeof(playlist[0]) - 1)) {
-        esp_audio_play((int16_t *)(playlist[command_id + 1].data), playlist[command_id + 1].length, portMAX_DELAY);
+
+    //custom GPIO Control Mapping
+    switch (command_id){
+        case 1:
+            gpio_set_level(RELAY_1_GPIO, 1);
+            printf("[RELAY 1] Switched ON\n");
+            break;
+        case 2:
+            gpio_set_level(RELAY_1_GPIO, 0);
+            printf("[RELAY 1] Switched OFF\n");
+            break;
+        case 3:
+            gpio_set_level(RELAY_2_GPIO,1);
+            printf("[RELAY 2] Switched ON\n");
+            break;
+        case 4:
+            gpio_set_level(RELAY_2_GPIO, 0);
+            printf("[RELAY 2] Switched OFF\n");
+            break;
+        default:
+            printf("[COMMAND]No GPIO action mapped for ID %d\n", command_id);
+            break;
     }
 }
