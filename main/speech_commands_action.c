@@ -21,7 +21,6 @@
 #define RELAY_1_GPIO GPIO_NUM_4
 #define RELAY_2_GPIO GPIO_NUM_5
 
-extern int detect_flag;
 
 typedef struct {
     char* name;
@@ -114,7 +113,7 @@ void wake_up_action(void)
 {
     printf("[WAKE] 'HI ESP' detected -> Pixel LED turning BLUE!\n");
     led_set_blue();
-    esp_audio_play((int16_t *)(playlist[0].data), playlist[0].length, portMAX_DELAY);
+   
 }
 
 void speech_commands_action(int command_id)

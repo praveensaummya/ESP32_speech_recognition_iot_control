@@ -1,7 +1,6 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <math.h>
 #include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -61,7 +60,7 @@ static void print_audio_stream_status(afe_fetch_result_t *res, int afe_chunksize
     prev_vad_state = vad_state;
 
     // Print status roughly every ~240ms (15 frames) or immediately when voice activity status changes
-    if (frame_count % 15 != 0 && !vad_changed) {
+    if (frame_count % 10 != 0 && !vad_changed) {
         return;
     }
 
@@ -130,6 +129,8 @@ void feed_Task(void *arg)
 
 void detect_Task(void *arg)
 {
+    esp_task_wdt_add(NULL);
+    
     esp_afe_sr_data_t *afe_data = arg;
     int afe_chunksize = afe_handle->get_fetch_chunksize(afe_data);
     char *mn_name = esp_srmodel_filter(models, ESP_MN_PREFIX, ESP_MN_ENGLISH);
@@ -141,16 +142,16 @@ void detect_Task(void *arg)
     model_iface_data_t *model_data = multinet->create(mn_name, 6000);
     int mu_chunksize = multinet->get_samp_chunksize(model_data);
 
-    esp_mn_commands_update_from_sdkconfig(multinet, model_data); // Add speech commands from sdkconfig
+    // esp_mn_commands_update_from_sdkconfig(multinet, model_data); // Add speech commands from sdkconfig
     assert(mu_chunksize == afe_chunksize);
 
 
     esp_mn_commands_clear();
 
-    esp_mn_commands_add(1,"relay one on");
-    esp_mn_commands_add(2,"relay one off");
-    esp_mn_commands_add(3,"relay two on");
-    esp_mn_commands_add(4,"relay two off");
+    esp_mn_commands_add(1,"switch on relay one");
+    esp_mn_commands_add(2,"switch off relay one");
+    esp_mn_commands_add(3,"switch on relay two");
+    esp_mn_commands_add(4,"switch off relay two");
 
     esp_mn_commands_update();
 
@@ -161,6 +162,9 @@ void detect_Task(void *arg)
     printf("------------detect start------------\n");
     fflush(stdout);
     while (task_flag) {
+        //when new loop starts clearing previos loop save cpu usage   
+        esp_task_wdt_reset(NULL);
+
         afe_fetch_result_t* res = afe_handle->fetch(afe_data); 
         if (!res || res->ret_value == ESP_FAIL) {
             printf("fetch error!\n");
@@ -173,18 +177,18 @@ void detect_Task(void *arg)
         if (res->wakeup_state == WAKENET_DETECTED) {
             printf("WAKEWORD DETECTED: HI ESP\n");
             fflush(stdout);
+
             wake_up_action();
+
+            //removing remaing audio frames from buffer
+            for (int i = 0 ; i<10;i++){
+                afe_handle->fetch(afe_data);
+            }
+            wakeup_flag = 1;
+            continue;
         }
 
-        if (res->raw_data_channels == 1 && res->wakeup_state == WAKENET_DETECTED) {
-            wakeup_flag = 1;
-        } else if (res->raw_data_channels > 1 && res->wakeup_state == WAKENET_CHANNEL_VERIFIED) {
-
-            // For a multi-channel AFE, it is necessary to wait for the channel to be verified.
-            printf("AFE_FETCH_CHANNEL_VERIFIED, channel index: %d\n", res->trigger_channel_id);
-            wakeup_flag = 1;
-        }
-
+        //Speech command detection handler 
         if (wakeup_flag == 1) {
             esp_mn_state_t mn_state = multinet->detect(model_data, res->data);
 
@@ -199,8 +203,15 @@ void detect_Task(void *arg)
                     i+1, mn_result->command_id[i], mn_result->phrase_id[i], mn_result->string, mn_result->prob[i]);
                     fflush(stdout);
                 }
-                if (mn_result->num > 0) {
-                    speech_commands_action(mn_result->command_id[0]);
+
+
+                if(mn_result->num>0){
+                    if(mn_result->prob[0]>= 0.33f){
+                        speech_commands_action(mn_result->command_id[0]);
+
+                    }else{
+                        printf("[IGNORED] Low confidence detection (prob:%f < 0.55)\n",mn_result->prob[0]);
+                    }
                 }
                 printf("-----------listening-----------\n");
                 fflush(stdout);
@@ -224,6 +235,7 @@ void detect_Task(void *arg)
         model_data = NULL;
     }
     printf("detect exit\n");
+    esp_task_wdt_delete(NULL);
     vTaskDelete(NULL);
 }
 
@@ -268,7 +280,12 @@ void app_main()
 #endif
 
     task_flag = 1;
-    xTaskCreatePinnedToCore(&detect_Task, "detect", 8 * 1024, (void*)afe_data, 5, NULL, 1);
+    xTaskCreatePinnedToCore(
+        &detect_Task, 
+        "detect_Task", 
+        8 * 1024, 
+        (void*)afe_data, 5,
+         NULL, 1);
     xTaskCreatePinnedToCore(&feed_Task, "feed", 8 * 1024, (void*)afe_data, 5, NULL, 0);
 }
 
