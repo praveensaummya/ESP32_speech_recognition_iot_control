@@ -125,19 +125,19 @@ void speech_commands_action(int command_id)
     switch (command_id){
         case 1:
             gpio_set_level(RELAY_1_GPIO, 1);
-            printf("[RELAY 1] Switched ON\n");
+            printf("[RELAY 1]  ON\n");
             break;
         case 2:
             gpio_set_level(RELAY_1_GPIO, 0);
-            printf("[RELAY 1] Switched OFF\n");
+            printf("[RELAY 1]  OFF\n");
             break;
         case 3:
             gpio_set_level(RELAY_2_GPIO,1);
-            printf("[RELAY 2] Switched ON\n");
+            printf("[RELAY 2] ON\n");
             break;
         case 4:
             gpio_set_level(RELAY_2_GPIO, 0);
-            printf("[RELAY 2] Switched OFF\n");
+            printf("[RELAY 2]  OFF\n");
             break;
         default:
             printf("[COMMAND]No GPIO action mapped for ID %d\n", command_id);

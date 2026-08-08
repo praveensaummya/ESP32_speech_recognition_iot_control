@@ -24,8 +24,10 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 
-
 #include "wifi_manager.h"
+
+#define ENABLE_AUDIO_METER 0 //set to 0 disable, 1 to enable
+
 /* @brief tag used for ESP serial console messages */
 static const char TAG[] = "main";
 
@@ -130,7 +132,7 @@ void feed_Task(void *arg)
 void detect_Task(void *arg)
 {
     esp_task_wdt_add(NULL);
-    
+
     esp_afe_sr_data_t *afe_data = arg;
     int afe_chunksize = afe_handle->get_fetch_chunksize(afe_data);
     char *mn_name = esp_srmodel_filter(models, ESP_MN_PREFIX, ESP_MN_ENGLISH);
@@ -148,10 +150,10 @@ void detect_Task(void *arg)
 
     esp_mn_commands_clear();
 
-    esp_mn_commands_add(1,"switch on relay one");
-    esp_mn_commands_add(2,"switch off relay one");
-    esp_mn_commands_add(3,"switch on relay two");
-    esp_mn_commands_add(4,"switch off relay two");
+    esp_mn_commands_add(1,"on relay one");
+    esp_mn_commands_add(2,"off relay one");
+    esp_mn_commands_add(3,"on relay two");
+    esp_mn_commands_add(4,"off relay two");
 
     esp_mn_commands_update();
 
@@ -170,8 +172,10 @@ void detect_Task(void *arg)
             printf("fetch error!\n");
             break;
         }
-
+        
+        #if ENABLE_AUDIO_METER
         print_audio_stream_status(res, afe_chunksize, wakeup_flag);
+        #endif
 
 
         if (res->wakeup_state == WAKENET_DETECTED) {
@@ -270,7 +274,7 @@ void app_main()
     // ESP_ERROR_CHECK(esp_sdcard_init("/sdcard", 10));
 
 #if CONFIG_IDF_TARGET_ESP32
-    printf("This demo only support ESP32S3\n");
+    printf("This   only support ESP32S3\n");
     return;
 #else 
     afe_config_t *afe_config = afe_config_init(esp_get_input_format(), models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
