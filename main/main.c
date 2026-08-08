@@ -26,6 +26,9 @@
 
 #include "wifi_manager.h"
 
+
+#include "cpu_monitor.h"
+
 #define ENABLE_AUDIO_METER 0 //set to 0 disable, 1 to enable
 
 /* @brief tag used for ESP serial console messages */
@@ -109,6 +112,8 @@ static void print_audio_stream_status(afe_fetch_result_t *res, int afe_chunksize
 
 void feed_Task(void *arg)
 {
+    vTaskDelay(pdMS_TO_TICKS(100));
+
     esp_afe_sr_data_t *afe_data = arg;
     int audio_chunksize = afe_handle->get_feed_chunksize(afe_data);
     int nch = afe_handle->get_feed_channel_num(afe_data);
@@ -144,27 +149,20 @@ void detect_Task(void *arg)
     model_iface_data_t *model_data = multinet->create(mn_name, 6000);
     int mu_chunksize = multinet->get_samp_chunksize(model_data);
 
-    // esp_mn_commands_update_from_sdkconfig(multinet, model_data); // Add speech commands from sdkconfig
     assert(mu_chunksize == afe_chunksize);
 
-
     esp_mn_commands_clear();
-
-    esp_mn_commands_add(1,"on relay one");
-    esp_mn_commands_add(2,"off relay one");
-    esp_mn_commands_add(3,"on relay two");
-    esp_mn_commands_add(4,"off relay two");
-
+    esp_mn_commands_add(1, "inverter on");
+    esp_mn_commands_add(2, "inverter off");
     esp_mn_commands_update();
 
-    //print active speech commands
     multinet->print_active_speech_commands(model_data);
     fflush(stdout);
 
     printf("------------detect start------------\n");
     fflush(stdout);
+
     while (task_flag) {
-        //when new loop starts clearing previos loop save cpu usage   
         esp_task_wdt_reset(NULL);
 
         afe_fetch_result_t* res = afe_handle->fetch(afe_data); 
@@ -177,22 +175,20 @@ void detect_Task(void *arg)
         print_audio_stream_status(res, afe_chunksize, wakeup_flag);
         #endif
 
-
+        // 1. WAKEWORD DETECTED
         if (res->wakeup_state == WAKENET_DETECTED) {
             printf("WAKEWORD DETECTED: HI ESP\n");
             fflush(stdout);
 
+            afe_handle->disable_wakenet(afe_data);
             wake_up_action();
+            
 
-            //removing remaing audio frames from buffer
-            for (int i = 0 ; i<10;i++){
-                afe_handle->fetch(afe_data);
-            }
             wakeup_flag = 1;
             continue;
         }
 
-        //Speech command detection handler 
+        // 2. COMMAND DETECTION & TIMEOUT HANDLER
         if (wakeup_flag == 1) {
             esp_mn_state_t mn_state = multinet->detect(model_data, res->data);
 
@@ -200,40 +196,55 @@ void detect_Task(void *arg)
                 continue;
             }
 
+            // Command Successfully Detected
             if (mn_state == ESP_MN_STATE_DETECTED) {
                 esp_mn_results_t *mn_result = multinet->get_results(model_data);
                 for (int i = 0; i < mn_result->num; i++) {
                     printf("TOP %d, command_id: %d, phrase_id: %d, string: %s, prob: %f\n", 
-                    i+1, mn_result->command_id[i], mn_result->phrase_id[i], mn_result->string, mn_result->prob[i]);
+                        i+1, mn_result->command_id[i], mn_result->phrase_id[i], mn_result->string, mn_result->prob[i]);
                     fflush(stdout);
                 }
 
-
-                if(mn_result->num>0){
-                    if(mn_result->prob[0]>= 0.33f){
+                if (mn_result->num > 0) {
+                    if (mn_result->prob[0] >= 0.12f) {
                         speech_commands_action(mn_result->command_id[0]);
-
-                    }else{
-                        printf("[IGNORED] Low confidence detection (prob:%f < 0.55)\n",mn_result->prob[0]);
+                    } else {
+                        printf("[IGNORED] Low confidence detection (prob:%f < 0.12)\n", mn_result->prob[0]);
                     }
                 }
-                printf("-----------listening-----------\n");
+
+                // Reset state back to Wakeword listening mode
+                afe_handle->enable_wakenet(afe_data);
+                wakeup_flag = 0;
+
+                // Reset LED back to idle / green state
+                led_set_off();
+
+                printf("\n-----------awaits to be waken up-----------\n");
                 fflush(stdout);
+                continue;
             }
 
+            // Timeout Occurred
             if (mn_state == ESP_MN_STATE_TIMEOUT) {
                 esp_mn_results_t *mn_result = multinet->get_results(model_data);
                 printf("timeout, string:%s\n", mn_result->string);
                 fflush(stdout);
+
+                // Reset state back to Wakeword listening mode
                 afe_handle->enable_wakenet(afe_data);
                 wakeup_flag = 0;
-                led_set_off();
+
+                // Ensure LED returns to idle state
+                led_set_off(); 
+
                 printf("\n-----------awaits to be waken up-----------\n");
                 fflush(stdout);
                 continue;
             }
         }
     }
+
     if (model_data) {
         multinet->destroy(model_data);
         model_data = NULL;
@@ -242,7 +253,6 @@ void detect_Task(void *arg)
     esp_task_wdt_delete(NULL);
     vTaskDelete(NULL);
 }
-
 
 void app_main()
 {
@@ -267,21 +277,21 @@ void app_main()
     //voice recognition models
     models = esp_srmodel_init("model"); // partition label defined in partitions.csv
     ESP_ERROR_CHECK(esp_board_init(16000, 2, 16));
+
     led_init(); // Initialize built-in WS2812 Pixel LED
-
-
+    led_set_off();
 
     // ESP_ERROR_CHECK(esp_sdcard_init("/sdcard", 10));
 
-#if CONFIG_IDF_TARGET_ESP32
-    printf("This   only support ESP32S3\n");
-    return;
-#else 
+
     afe_config_t *afe_config = afe_config_init(esp_get_input_format(), models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
+    afe_config->afe_ringbuf_size = 100;
+
     afe_handle = esp_afe_handle_from_config(afe_config);
     esp_afe_sr_data_t *afe_data = afe_handle->create_from_config(afe_config);
+
     afe_config_free(afe_config);
-#endif
+
 
     task_flag = 1;
     xTaskCreatePinnedToCore(
@@ -291,5 +301,7 @@ void app_main()
         (void*)afe_data, 5,
          NULL, 1);
     xTaskCreatePinnedToCore(&feed_Task, "feed", 8 * 1024, (void*)afe_data, 5, NULL, 0);
+
+    cpu_monitor_start();
 }
 

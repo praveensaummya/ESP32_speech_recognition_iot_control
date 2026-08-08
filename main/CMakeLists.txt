@@ -1,6 +1,7 @@
 set(srcs
     main.c
     speech_commands_action.c
+    cpu_monitor.c
     )
 
 set(requires

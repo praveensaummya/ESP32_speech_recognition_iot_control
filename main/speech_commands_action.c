@@ -90,12 +90,12 @@ void led_set_color(uint8_t red, uint8_t green, uint8_t blue)
 
 void led_set_blue(void)
 {
-    led_set_color(0, 0, 255);
+    led_set_color(0, 0, 100);
 }
 
 void led_set_green(void)
 {
-    led_set_color(0, 255, 0);
+    led_set_color(0, 100, 0);
 }
 
 void led_set_off(void)
@@ -118,8 +118,7 @@ void wake_up_action(void)
 
 void speech_commands_action(int command_id)
 {
-    printf("[COMMAND] Command ID %d recognized -> Pixel LED turning GREEN!\n", command_id);
-    led_set_green();
+
 
     //custom GPIO Control Mapping
     switch (command_id){
