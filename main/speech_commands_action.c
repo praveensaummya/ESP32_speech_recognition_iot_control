@@ -1,61 +1,67 @@
-/*
-   This example code is in the Public Domain (or CC0 licensed, at your option.)
-
-   Unless required by applicable law or agreed to in writing, this
-   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-   CONDITIONS OF ANY KIND, either express or implied.
-*/
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
-
-
+#include "led_strip.h"
 
 #include "esp_board_init.h"
 #include "wake_up_prompt_tone.h"
 #include "speech_commands_action.h"
-
+#include "mqtt_server.h" 
 #define RELAY_1_GPIO GPIO_NUM_4
 #define RELAY_2_GPIO GPIO_NUM_5
 
-
-typedef struct {
-    char* name;
-    const uint16_t* data;
-    int length;
-} dac_audio_item_t;
-
-#include "led_strip.h"
-
-// Default built-in WS2812 RGB LED pin on ESP32-S3 DevKit boards (GPIO 48)
-// Modify BUILTIN_PIXEL_LED_GPIO below if your specific board uses another pin (e.g. 21, 38, or 19)
 #ifndef BUILTIN_PIXEL_LED_GPIO
 #define BUILTIN_PIXEL_LED_GPIO 48
-
 #endif
 
 static led_strip_handle_t s_led_strip = NULL;
 
-//initilize GPIOs for Relays
-static void relay_gpio_init(void){
+// 1. Standalone Relay Initialization
+void relay_gpio_init(void)
+{
     gpio_config_t io_conf = {
-        .pin_bit_mask =(1ULL <<RELAY_1_GPIO) | (1ULL<<RELAY_2_GPIO),
+        .pin_bit_mask = (1ULL << RELAY_1_GPIO) | (1ULL << RELAY_2_GPIO),
         .mode = GPIO_MODE_OUTPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_ENABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
     gpio_config(&io_conf);
-    //set gpios initilization at 0
+
+    // Set initial GPIO state to OFF
     gpio_set_level(RELAY_1_GPIO, 0);
     gpio_set_level(RELAY_2_GPIO, 0);
+    printf("[RELAY] GPIO %d and GPIO %d initialized to OFF\n", RELAY_1_GPIO, RELAY_2_GPIO);
 }
 
+// 2. Unified Relay Control Function (Drives HW & Cloud MQTT)
+void set_relay_state(int relay_id, int state)
+{
+    gpio_num_t pin;
+
+    if (relay_id == 1) {
+        pin = RELAY_1_GPIO;
+    } else if (relay_id == 2) {
+        pin = RELAY_2_GPIO;
+    } else {
+        printf("[RELAY ERROR] Invalid relay ID %d\n", relay_id);
+        return;
+    }
+
+    // Set physical hardware level
+    gpio_set_level(pin, state ? 1 : 0);
+    printf("[RELAY %d] -> %s\n", relay_id, state ? "ON" : "OFF");
+
+    // Publish state update to Cloud MQTT topic
+    mqtt_publish_relay_status(relay_id, state);
+}
+
+// 3. Standalone LED Initialization (Removed hidden relay_gpio_init call)
 void led_init(void)
-{   relay_gpio_init();
+{
     if (s_led_strip != NULL) {
         return;
     }
@@ -105,41 +111,34 @@ void led_set_off(void)
     }
 }
 
-
-
-
-
 void wake_up_action(void)
 {
     printf("[WAKE] 'HI ESP' detected -> Pixel LED turning BLUE!\n");
     led_set_blue();
-   
 }
 
+// 4. Voice Command Handler
 void speech_commands_action(int command_id)
 {
-
-
-    //custom GPIO Control Mapping
-    switch (command_id){
+    switch (command_id) {
         case 1:
-            gpio_set_level(RELAY_1_GPIO, 1);
+            set_relay_state(1, 1); // Relay 1 ON
             printf("[RELAY 1]  ON\n");
             break;
         case 2:
-            gpio_set_level(RELAY_1_GPIO, 0);
+            set_relay_state(1, 0); // Relay 1 OFF
             printf("[RELAY 1]  OFF\n");
             break;
         case 3:
-            gpio_set_level(RELAY_2_GPIO,1);
-            printf("[RELAY 2] ON\n");
+            set_relay_state(2, 1); // Relay 2 ON
+            printf("[RELAY 2]  ON\n");
             break;
         case 4:
-            gpio_set_level(RELAY_2_GPIO, 0);
+            set_relay_state(2, 0); // Relay 2 OFF
             printf("[RELAY 2]  OFF\n");
             break;
         default:
-            printf("[COMMAND]No GPIO action mapped for ID %d\n", command_id);
+            printf("[COMMAND] No action mapped for ID %d\n", command_id);
             break;
     }
 }

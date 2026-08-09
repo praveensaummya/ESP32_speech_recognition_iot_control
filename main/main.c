@@ -1,7 +1,9 @@
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <string.h>
+#include <math.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -16,7 +18,6 @@
 #include "model_path.h"
 #include "esp_process_sdkconfig.h"
 
-#include <string.h>
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "esp_system.h"
@@ -25,33 +26,47 @@
 #include "nvs.h"
 
 #include "wifi_manager.h"
-
-
 #include "cpu_monitor.h"
+#include "mqtt_server.h"
 
-#define ENABLE_AUDIO_METER 0 //set to 0 disable, 1 to enable
+#define ENABLE_AUDIO_METER 0 // set to 0 disable, 1 to enable
 
 /* @brief tag used for ESP serial console messages */
 static const char TAG[] = "main";
-
-/**
- * @brief this is an exemple of a callback that you can setup in your own app to get notified of wifi manager event.
- */
-void cb_connection_ok(void *pvParameter){
-	ip_event_got_ip_t* param = (ip_event_got_ip_t*)pvParameter;
-
-	/* transform IP to human readable string */
-	char str_ip[16];
-	esp_ip4addr_ntoa(&param->ip_info.ip, str_ip, IP4ADDR_STRLEN_MAX);
-
-	ESP_LOGI(TAG, "I have a connection and my IP is %s!", str_ip);
-}
-
 
 int wakeup_flag = 0;
 static const esp_afe_sr_iface_t *afe_handle = NULL;
 static volatile int task_flag = 0;
 srmodel_list_t *models = NULL;
+
+/**
+ * @brief Callback triggered when Wi-Fi connects and gets an IP address.
+ */
+void cb_connection_ok(void *pvParameter){
+    ip_event_got_ip_t* param = (ip_event_got_ip_t*)pvParameter;
+    char str_ip[16];
+    esp_ip4addr_ntoa(&param->ip_info.ip, str_ip, IP4ADDR_STRLEN_MAX);
+
+    ESP_LOGI(TAG, "I have a connection and my IP is %s!", str_ip);
+
+    // 1. Start a Dedicated API Server on Port 8080 to avoid wifi_manager wildcard conflicts
+    static httpd_handle_t api_server = NULL;
+    if (api_server == NULL) {
+        httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+        config.server_port = 8080;   // Custom API port
+        config.ctrl_port = 32769;    // MUST be different from wifi_manager (default 32768)
+        
+        ESP_LOGI(TAG, "Starting dedicated API server on port %d", config.server_port);
+        if (httpd_start(&api_server, &config) == ESP_OK) {
+            register_mqtt_http_routes(api_server);
+        } else {
+            ESP_LOGE(TAG, "Failed to start API server on port 8080");
+        }
+    }
+
+    // 2. Start MQTT Cloud service when IP is acquired
+    mqtt_app_start();
+}
 
 static void print_audio_stream_status(afe_fetch_result_t *res, int afe_chunksize, int wakeup_flag)
 {
@@ -182,7 +197,6 @@ void detect_Task(void *arg)
 
             afe_handle->disable_wakenet(afe_data);
             wake_up_action();
-            
 
             wakeup_flag = 1;
             continue;
@@ -263,6 +277,7 @@ void app_main()
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
     // Initialize esp_netif (required for Wi-Fi in IDF v5.x)
     ESP_ERROR_CHECK(esp_netif_init());
     
@@ -270,19 +285,19 @@ void app_main()
     if(err != ESP_OK && err != ESP_ERR_INVALID_STATE){
         ESP_ERROR_CHECK(err);
     }
-    // Start Wi-Fi Manager AFTER NVS and netif are ready
-    wifi_manager_start();
 
-    wifi_manager_set_callback(WM_EVENT_STA_GOT_IP, &cb_connection_ok);
-    //voice recognition models
-    models = esp_srmodel_init("model"); // partition label defined in partitions.csv
-    ESP_ERROR_CHECK(esp_board_init(16000, 2, 16));
+    relay_gpio_init();
 
     led_init(); // Initialize built-in WS2812 Pixel LED
     led_set_off();
 
-    // ESP_ERROR_CHECK(esp_sdcard_init("/sdcard", 10));
+    // Start Wi-Fi Manager AFTER NVS and netif are ready
+    wifi_manager_start();
+    wifi_manager_set_callback(WM_EVENT_STA_GOT_IP, &cb_connection_ok);
 
+    // Voice recognition models initialization
+    models = esp_srmodel_init("model"); // partition label defined in partitions.csv
+    ESP_ERROR_CHECK(esp_board_init(16000, 2, 16));
 
     afe_config_t *afe_config = afe_config_init(esp_get_input_format(), models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
     afe_config->afe_ringbuf_size = 100;
@@ -292,16 +307,14 @@ void app_main()
 
     afe_config_free(afe_config);
 
-
     task_flag = 1;
     xTaskCreatePinnedToCore(
         &detect_Task, 
         "detect_Task", 
         8 * 1024, 
         (void*)afe_data, 5,
-         NULL, 1);
+        NULL, 1);
     xTaskCreatePinnedToCore(&feed_Task, "feed", 8 * 1024, (void*)afe_data, 5, NULL, 0);
 
-    cpu_monitor_start();
+    // cpu_monitor_start();
 }
-
