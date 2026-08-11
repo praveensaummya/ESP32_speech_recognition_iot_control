@@ -29,6 +29,8 @@
 #include "cpu_monitor.h"
 #include "mqtt_server.h"
 
+#include "mdns.h"
+
 #define ENABLE_AUDIO_METER 0 // set to 0 disable, 1 to enable
 
 /* @brief tag used for ESP serial console messages */
@@ -38,6 +40,19 @@ int wakeup_flag = 0;
 static const esp_afe_sr_iface_t *afe_handle = NULL;
 static volatile int task_flag = 0;
 srmodel_list_t *models = NULL;
+
+
+void start_mdns_service(void) {
+    esp_err_t err = mdns_init();
+    if (err != ESP_OK) {
+        ESP_LOGE("MDNS", "MDNS Init failed: %d", err);
+        return;
+    }
+    // Set hostname so the device can be addressed as http://esp32-relay.local:8080
+    mdns_hostname_set("esp32-s3-inverter");
+    mdns_instance_name_set("ESP32-S3 Smart Inverter Controller");
+    ESP_LOGI("MDNS", "mDNS hostname set to http://esp32-s3-inverter.local:8080");
+}
 
 /**
  * @brief Callback triggered when Wi-Fi connects and gets an IP address.
@@ -55,6 +70,8 @@ void cb_connection_ok(void *pvParameter){
         httpd_config_t config = HTTPD_DEFAULT_CONFIG();
         config.server_port = 8080;   // Custom API port
         config.ctrl_port = 32769;    // MUST be different from wifi_manager (default 32768)
+        // config.max_open_sockets = 4;       // Limit max open sockets for this server
+        // config.lru_purge_enable = true;    // Automatically close oldest idle connection
         
         ESP_LOGI(TAG, "Starting dedicated API server on port %d", config.server_port);
         if (httpd_start(&api_server, &config) == ESP_OK) {
@@ -180,10 +197,25 @@ void detect_Task(void *arg)
     while (task_flag) {
         esp_task_wdt_reset(NULL);
 
+        // Continue fetching audio chunk to drain buffer and prevent overflow
         afe_fetch_result_t* res = afe_handle->fetch(afe_data); 
         if (!res || res->ret_value == ESP_FAIL) {
             printf("fetch error!\n");
             break;
+        }
+
+        // -------------------------------------------------------------
+        //  DYNAMIC VOICE RECOGNITION BYPASS CHECK
+        // -------------------------------------------------------------
+        if (!g_voice_recognition_enabled) {
+            // If voice is disabled mid-command, reset active listening state
+            if (wakeup_flag == 1) {
+                wakeup_flag = 0;
+                afe_handle->enable_wakenet(afe_data);
+                led_set_off();
+            }
+            vTaskDelay(pdMS_TO_TICKS(10)); // Yield CPU slightly
+            continue; // Skip Wakeword and Speech Command processing
         }
         
         #if ENABLE_AUDIO_METER
@@ -267,16 +299,25 @@ void detect_Task(void *arg)
     esp_task_wdt_delete(NULL);
     vTaskDelete(NULL);
 }
-
 void app_main()
 {
-    // Initialize NVS
+    // 1. Initialize NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND){
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
     }
-    ESP_ERROR_CHECK(ret);
+    ESP_ERROR_CHECK(ret); 
+    // 2. Read saved voice recognition setting from NVS on boot
+    nvs_handle_t my_handle;
+    if (nvs_open("storage", NVS_READONLY, &my_handle) == ESP_OK) {
+        uint8_t voice_state = 1; // Default value (1 = ON)
+        if (nvs_get_u8(my_handle, "voice_enabled", &voice_state) == ESP_OK) {
+            g_voice_recognition_enabled = (voice_state == 1);
+            ESP_LOGI(TAG, "Loaded Voice Recognition State from NVS: %s", g_voice_recognition_enabled ? "ON" : "OFF");
+        }
+        nvs_close(my_handle);
+    }
 
     // Initialize esp_netif (required for Wi-Fi in IDF v5.x)
     ESP_ERROR_CHECK(esp_netif_init());

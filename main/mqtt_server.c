@@ -9,10 +9,15 @@
 #include "nvs.h"
 #include "cJSON.h"
 
+// NVS Namespaces & Keys for MQTT
 #define NVS_NAMESPACE       "mqtt_config"
 #define NVS_KEY_URI         "broker_uri"
 #define NVS_KEY_USER        "broker_user"
 #define NVS_KEY_PASS        "broker_pass"
+
+// NVS Namespaces & Keys for Voice Control
+#define NVS_VOICE_NAMESPACE "voice_cfg"
+#define NVS_KEY_VOICE_EN   "voice_enabled"
 
 // Default fallback values
 #define DEFAULT_BROKER_URI  ""
@@ -26,9 +31,40 @@ static char s_broker_uri[256];
 static char s_broker_user[64];
 static char s_broker_pass[64];
 
+// Global Voice Recognition State Flag
+bool g_voice_recognition_enabled = true;
+
 // ==========================================
-// NVS Storage Functions
+// NVS Storage Functions (MQTT & Voice)
 // ==========================================
+
+void load_voice_recognition_state(void)
+{
+    nvs_handle_t nvs_h;
+    uint8_t enabled = 1; // Default to ON (1)
+    if (nvs_open(NVS_VOICE_NAMESPACE, NVS_READONLY, &nvs_h) == ESP_OK) {
+        if (nvs_get_u8(nvs_h, NVS_KEY_VOICE_EN, &enabled) == ESP_OK) {
+            ESP_LOGI(TAG, "Loaded Voice Recognition State from NVS: %s", enabled ? "ON" : "OFF");
+        }
+        nvs_close(nvs_h);
+    } else {
+        ESP_LOGW(TAG, "No Voice NVS state found, defaulting Voice Recognition to ON");
+    }
+    g_voice_recognition_enabled = (enabled != 0);
+}
+
+void save_voice_recognition_state(bool enabled)
+{
+    nvs_handle_t nvs_h;
+    if (nvs_open(NVS_VOICE_NAMESPACE, NVS_READWRITE, &nvs_h) == ESP_OK) {
+        nvs_set_u8(nvs_h, NVS_KEY_VOICE_EN, enabled ? 1 : 0);
+        nvs_commit(nvs_h);
+        nvs_close(nvs_h);
+        ESP_LOGI(TAG, "Saved Voice Recognition State to NVS: %s", enabled ? "ON" : "OFF");
+    } else {
+        ESP_LOGE(TAG, "Failed to open NVS namespace for Voice Config");
+    }
+}
 
 esp_err_t mqtt_get_config(char *uri_buf, size_t uri_len, 
                         char *user_buf, size_t user_len, 
@@ -43,19 +79,16 @@ esp_err_t mqtt_get_config(char *uri_buf, size_t uri_len,
         return ESP_OK;
     }
 
-    // Load URI
     size_t req_len = uri_len;
     if (nvs_get_str(nvs_h, NVS_KEY_URI, uri_buf, &req_len) != ESP_OK || strlen(uri_buf) == 0) {
         snprintf(uri_buf, uri_len, "%s", DEFAULT_BROKER_URI);
     }
 
-    // Load Username
     req_len = user_len;
     if (nvs_get_str(nvs_h, NVS_KEY_USER, user_buf, &req_len) != ESP_OK) {
         snprintf(user_buf, user_len, "%s", DEFAULT_BROKER_USER);
     }
 
-    // Load Password
     req_len = pass_len;
     if (nvs_get_str(nvs_h, NVS_KEY_PASS, pass_buf, &req_len) != ESP_OK) {
         snprintf(pass_buf, pass_len, "%s", DEFAULT_BROKER_PASS);
@@ -121,6 +154,15 @@ void mqtt_publish_relay_status(int relay_id, int state)
         ESP_LOGI(TAG, "Published status: %s", status_json);
     }
 }
+void mqtt_publish_voice_status(bool enabled)
+{
+    if (s_mqtt_client != NULL) {
+        char status_json[64];
+        snprintf(status_json, sizeof(status_json), "{\"voice_enabled\":%s}", enabled ? "true" : "false");
+        esp_mqtt_client_publish(s_mqtt_client, "device/voice/status", status_json, 0, 1, 0);
+        ESP_LOGI(TAG, "Published Voice Status to MQTT: %s", status_json);
+    }
+}
 
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
@@ -130,6 +172,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         case MQTT_EVENT_CONNECTED:
             ESP_LOGI(TAG, "Connected to MQTT Cloud Broker!");
             esp_mqtt_client_subscribe(event->client, "device/relays/command", 1);
+            esp_mqtt_client_subscribe(event->client, "device/voice/command", 1);
             break;
 
         case MQTT_EVENT_DISCONNECTED:
@@ -143,11 +186,19 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             if (root != NULL) {
                 cJSON *relay = cJSON_GetObjectItem(root, "relay");
                 cJSON *state = cJSON_GetObjectItem(root, "state");
+                cJSON *voice = cJSON_GetObjectItem(root, "voice_enabled");
 
                 if (cJSON_IsNumber(relay) && cJSON_IsNumber(state)) {
                     set_relay_state(relay->valueint, state->valueint);
-                } else {
-                    ESP_LOGE(TAG, "Invalid JSON structure. Expected: {\"relay\": int, \"state\": int}");
+                } else if(voice != NULL){
+                    bool new_state = cJSON_IsTrue(voice) || (cJSON_IsNumber(voice) && voice->valueint == 1);
+                    g_voice_recognition_enabled = new_state;
+                    save_voice_recognition_state(new_state);     // Save to NVS
+                    mqtt_publish_voice_status(new_state);        // Sync back to cloud
+                    
+                    ESP_LOGI(TAG, "Voice Recognition changed via MQTT to: %s", new_state ? "ON" : "OFF");
+                }else {
+                    ESP_LOGE(TAG, "Invalid JSON structure. Expected: {\"relay\": int, \"state\": int,\"voice\":bool,}");
                 }
                 cJSON_Delete(root);
             } else {
@@ -237,11 +288,10 @@ static esp_err_t mqtt_config_post_handler(httpd_req_t *req)
         }
         cur_len += received;
     }
-    buf[cur_len] = '\0'; // Ensure null-termination
+    buf[cur_len] = '\0';
 
     ESP_LOGI(TAG, "Received MQTT Config JSON: %s", buf);
 
-    // Parse JSON payload
     cJSON *root = cJSON_Parse(buf);
     if (!root) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON format");
@@ -262,36 +312,28 @@ static esp_err_t mqtt_config_post_handler(httpd_req_t *req)
     const char *user = cJSON_IsString(user_item) ? user_item->valuestring : "";
     const char *pass = cJSON_IsString(pass_item) ? pass_item->valuestring : "";
 
-    // Save configuration to NVS
     mqtt_save_config(uri, user, pass);
     cJSON_Delete(root);
 
-    // Restart MQTT client with new configuration
     mqtt_app_start();
 
-    // Send successful JSON response back to client
     const char *resp_str = "{\"status\":\"ok\",\"message\":\"MQTT configuration saved and client restarted successfully!\"}";
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp_str, HTTPD_RESP_USE_STRLEN);
 
-    return ESP_OK; // Crucial: returning ESP_OK tells esp_http_server the request succeeded
+    return ESP_OK;
 }
 
 static esp_err_t mqtt_config_delete_handler(httpd_req_t *req)
 {
-    // 1. Wipe saved configuration from NVS
     mqtt_clear_config();
-
-    // 2. Stop running MQTT client instance
     mqtt_app_stop();
 
-    // 3. Respond with JSON success
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"status\":\"ok\",\"message\":\"MQTT configuration erased and client stopped!\"}");
 
     return ESP_OK;
 }
-
 
 static esp_err_t relay_post_handler(httpd_req_t *req) {
     char buf[128] = {0};
@@ -304,7 +346,6 @@ static esp_err_t relay_post_handler(httpd_req_t *req) {
         cJSON *state = cJSON_GetObjectItem(root, "state");
         if (cJSON_IsNumber(relay) && cJSON_IsNumber(state)) {
             set_relay_state(relay->valueint, state->valueint);
-            // Optionally publish status update to MQTT as well
             mqtt_publish_relay_status(relay->valueint, state->valueint);
         }
         cJSON_Delete(root);
@@ -312,6 +353,50 @@ static esp_err_t relay_post_handler(httpd_req_t *req) {
     httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
     return ESP_OK;
 }
+
+// ==========================================
+// HTTP Handlers for Voice Recognition Toggle
+// ==========================================
+
+static esp_err_t voice_config_post_handler(httpd_req_t *req)
+{
+    char buf[128] = {0};
+    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0) return ESP_FAIL;
+
+    cJSON *root = cJSON_Parse(buf);
+    if (root) {
+        cJSON *enabled_item = cJSON_GetObjectItem(root, "enabled");
+        if (cJSON_IsBool(enabled_item)) {
+            bool new_state = cJSON_IsTrue(enabled_item);
+            g_voice_recognition_enabled = new_state;
+            save_voice_recognition_state(new_state);
+
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+            cJSON_Delete(root);
+            return ESP_OK;
+        }
+        cJSON_Delete(root);
+    }
+
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON payload");
+    return ESP_FAIL;
+}
+
+static esp_err_t voice_status_get_handler(httpd_req_t *req)
+{
+    char resp_str[64];
+    snprintf(resp_str, sizeof(resp_str), "{\"voice_enabled\":%s}", g_voice_recognition_enabled ? "true" : "false");
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp_str);
+    return ESP_OK;
+}
+
+// ==========================================
+// Route Registration
+// ==========================================
 
 static httpd_handle_t last_registered_server = NULL;
 
@@ -322,12 +407,14 @@ void register_mqtt_http_routes(httpd_handle_t server)
         return;
     }
 
-    // If this exact server instance already has routes registered, skip safely
     if (last_registered_server == server) {
         return;
     }
 
-    // Register POST endpoint
+    // Load Voice Recognition State from NVS on server startup
+    load_voice_recognition_state();
+
+    // 1. POST /api/config/mqtt
     httpd_uri_t post_uri = {
         .uri      = "/api/config/mqtt",
         .method   = HTTP_POST,
@@ -336,7 +423,7 @@ void register_mqtt_http_routes(httpd_handle_t server)
     };
     esp_err_t err_post = httpd_register_uri_handler(server, &post_uri);
 
-    // Register DELETE endpoint
+    // 2. DELETE /api/config/mqtt
     httpd_uri_t delete_uri = {
         .uri      = "/api/config/mqtt",
         .method   = HTTP_DELETE,
@@ -345,7 +432,7 @@ void register_mqtt_http_routes(httpd_handle_t server)
     };
     esp_err_t err_del = httpd_register_uri_handler(server, &delete_uri);
 
-    // 3. POST /api/relay  <-- ADD THIS NEW ROUTE
+    // 3. POST /api/relay 
     httpd_uri_t post_relay_uri = {
         .uri      = "/api/relay",
         .method   = HTTP_POST,
@@ -353,13 +440,30 @@ void register_mqtt_http_routes(httpd_handle_t server)
         .user_ctx = NULL
     };
     esp_err_t err_relay = httpd_register_uri_handler(server, &post_relay_uri);
-    
+
+    // 4. POST /api/voice/config
+    httpd_uri_t post_voice_uri = {
+        .uri      = "/api/voice/config",
+        .method   = HTTP_POST,
+        .handler  = voice_config_post_handler,
+        .user_ctx = NULL
+    };
+    esp_err_t err_voice_post = httpd_register_uri_handler(server, &post_voice_uri);
+
+    // 5. GET /api/voice/status
+    httpd_uri_t get_voice_uri = {
+        .uri      = "/api/voice/status",
+        .method   = HTTP_GET,
+        .handler  = voice_status_get_handler,
+        .user_ctx = NULL
+    };
+    esp_err_t err_voice_get = httpd_register_uri_handler(server, &get_voice_uri);
+
     if ((err_post == ESP_OK || err_post == ESP_ERR_HTTPD_HANDLER_EXISTS) &&
         (err_del == ESP_OK || err_del == ESP_ERR_HTTPD_HANDLER_EXISTS)) {
         last_registered_server = server;
-        ESP_LOGI(TAG, "HTTP endpoints for /api/config/mqtt are successfully registered.");
+        ESP_LOGI(TAG, "HTTP endpoints for /api/config/mqtt, /api/relay, and /api/voice are successfully registered.");
     } else {
-        ESP_LOGE(TAG, "Failed to register HTTP endpoints: POST (%s), DELETE (%s)", 
-                 esp_err_to_name(err_post), esp_err_to_name(err_del));
+        ESP_LOGE(TAG, "Failed to register HTTP endpoints");
     }
 }

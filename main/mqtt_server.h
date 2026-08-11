@@ -9,6 +9,7 @@
 extern "C" {
 #endif
 
+
 /**
  * @brief Starts the MQTT client using the credentials and URI loaded from NVS.
  */
@@ -58,6 +59,8 @@ esp_err_t mqtt_get_config(char *uri_buf, size_t uri_len,
  * @param server Handle to active httpd_handle_t web server
  */
 void register_mqtt_http_routes(httpd_handle_t server);
+
+extern bool g_voice_recognition_enabled;
 
 #ifdef __cplusplus
 }
