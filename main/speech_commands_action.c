@@ -12,6 +12,7 @@
 #include "mqtt_server.h" 
 #define RELAY_1_GPIO GPIO_NUM_4
 #define RELAY_2_GPIO GPIO_NUM_5
+#define RELAY_3_GPIO GPIO_NUM_13
 
 #ifndef BUILTIN_PIXEL_LED_GPIO
 #define BUILTIN_PIXEL_LED_GPIO 48
@@ -23,7 +24,7 @@ static led_strip_handle_t s_led_strip = NULL;
 void relay_gpio_init(void)
 {
     gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << RELAY_1_GPIO) | (1ULL << RELAY_2_GPIO),
+        .pin_bit_mask = (1ULL << RELAY_1_GPIO) | (1ULL << RELAY_2_GPIO) | (1ULL << RELAY_3_GPIO),
         .mode = GPIO_MODE_OUTPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_ENABLE,
@@ -34,7 +35,8 @@ void relay_gpio_init(void)
     // Set initial GPIO state to OFF
     gpio_set_level(RELAY_1_GPIO, 0);
     gpio_set_level(RELAY_2_GPIO, 0);
-    printf("[RELAY] GPIO %d and GPIO %d initialized to OFF\n", RELAY_1_GPIO, RELAY_2_GPIO);
+    gpio_set_level(RELAY_3_GPIO, 0);
+    printf("[RELAY] GPIO %d , GPIO %d , and GPIO %d initialized to OFF\n", RELAY_1_GPIO, RELAY_2_GPIO,RELAY_3_GPIO);
 }
 
 // 2. Unified Relay Control Function (Drives HW & Cloud MQTT)
@@ -54,6 +56,14 @@ void set_relay_state(int relay_id, int state)
     // Set physical hardware level
     gpio_set_level(pin, state ? 1 : 0);
     printf("[RELAY %d] -> %s\n", relay_id, state ? "ON" : "OFF");
+
+
+    if(relay_id == 1){
+        gpio_set_level(RELAY_3_GPIO, state ? 1 : 0);
+        printf("[RELAY 3] -> %s (Mirrored with Relay 1)\n", state ? "ON" : "OFF");
+    }
+
+    
 
     // Publish state update to Cloud MQTT topic
     mqtt_publish_relay_status(relay_id, state);
