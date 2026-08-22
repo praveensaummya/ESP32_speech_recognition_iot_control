@@ -419,7 +419,20 @@ static esp_err_t voice_status_get_handler(httpd_req_t *req)
 // Route Registration
 // ==========================================
 
-void register_mqtt_http_routes(httpd_handle_t server) 
+// GET /api/status - reachability ping used by the JCON mobile app
+// (_checkDeviceReachability() calls http://<ip>:8080/api/status and expects HTTP 200)
+static esp_err_t status_get_handler(httpd_req_t *req)
+{
+    set_cors_headers(req);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Connection", "close"); // Prevents ESP32 socket leak (matches app header)
+    const char *resp_str =
+        "{\"status\":\"online\",\"device\":\"ESP32-S3 Inverter\",\"port\":8080}";
+    httpd_resp_send(req, resp_str, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+void register_mqtt_http_routes(httpd_handle_t server)
 {
     if (server == NULL) {
         ESP_LOGE(TAG, "Cannot register routes: HTTP server handle is NULL");
@@ -483,5 +496,14 @@ void register_mqtt_http_routes(httpd_handle_t server)
     };
     httpd_register_uri_handler(server, &get_voice_uri);
 
-    ESP_LOGI(TAG, "HTTP endpoints for /api/config/mqtt, /api/relay, and /api/voice successfully registered.");
+    // 7. GET /api/status - reachability ping for the mobile app (must return 200)
+    httpd_uri_t get_status_uri = {
+        .uri      = "/api/status",
+        .method   = HTTP_GET,
+        .handler  = status_get_handler,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(server, &get_status_uri);
+
+    ESP_LOGI(TAG, "HTTP endpoints for /api/config/mqtt, /api/relay, /api/voice, and /api/status successfully registered.");
 }

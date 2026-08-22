@@ -41,18 +41,39 @@ static const esp_afe_sr_iface_t *afe_handle = NULL;
 static volatile int task_flag = 0;
 srmodel_list_t *models = NULL;
 
+static bool s_mdns_started = false;
+
 void start_mdns_service(void) {
-    esp_err_t err = mdns_init();
-    if (err != ESP_OK) {
-        ESP_LOGE("MDNS", "MDNS Init failed: %d", err);
+    /* FIX: this runs every time Wi-Fi (re)connects. Re-adding the service caused
+     * "Service already exists" -> ESP_ERR_INVALID_ARG -> abort() reboot loop.
+     * Guard it so it only ever initialises once per boot. */
+    if (s_mdns_started) {
+        ESP_LOGI("MDNS", "mDNS already running - skipping re-initialisation");
         return;
     }
-    // Set hostname so the device can be addressed as http://esp32-s3-inverter.local:8080
-    mdns_hostname_set("inverter");
+
+    esp_err_t err = mdns_init();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) { // INVALID_STATE = already init, that's fine
+        ESP_LOGE("MDNS", "MDNS Init failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    // Hostname must match what the mobile app resolves: http://<hostname>.local:8080
+    // The JCON app discovers the device as "esp32-inverter.local" via mDNS.
+    mdns_hostname_set("esp32-inverter");
     mdns_instance_name_set("ESP32-S3 Smart Inverter Controller");
-    ESP_LOGI("MDNS", "mDNS hostname set to http://inverter.local:8080");
-    ESP_ERROR_CHECK(mdns_service_add("ESP32-WebServer", "_http", "_tcp", 8080, NULL, 0));
-    
+    ESP_LOGI("MDNS", "mDNS hostname set to http://esp32-inverter.local:8080");
+
+    err = mdns_service_add("ESP32-WebServer", "_http", "_tcp", 8080, NULL, 0);
+    if (err == ESP_OK) {
+        s_mdns_started = true;
+    } else if (err == ESP_ERR_INVALID_ARG || err == ESP_ERR_NO_MEM) {
+        /* "already exists" or transient error is NOT fatal - never abort here */
+        ESP_LOGW("MDNS", "mdns_service_add returned %s (non-fatal)", esp_err_to_name(err));
+        s_mdns_started = true; // hostname/instance are still registered
+    } else {
+        ESP_LOGW("MDNS", "mdns_service_add failed: %s", esp_err_to_name(err));
+    }
 }
 
 /**
