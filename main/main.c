@@ -41,17 +41,18 @@ static const esp_afe_sr_iface_t *afe_handle = NULL;
 static volatile int task_flag = 0;
 srmodel_list_t *models = NULL;
 
-
 void start_mdns_service(void) {
     esp_err_t err = mdns_init();
     if (err != ESP_OK) {
         ESP_LOGE("MDNS", "MDNS Init failed: %d", err);
         return;
     }
-    // Set hostname so the device can be addressed as http://esp32-relay.local:8080
-    mdns_hostname_set("esp32-s3-inverter");
+    // Set hostname so the device can be addressed as http://esp32-s3-inverter.local:8080
+    mdns_hostname_set("inverter");
     mdns_instance_name_set("ESP32-S3 Smart Inverter Controller");
-    ESP_LOGI("MDNS", "mDNS hostname set to http://esp32-s3-inverter.local:8080");
+    ESP_LOGI("MDNS", "mDNS hostname set to http://inverter.local:8080");
+    ESP_ERROR_CHECK(mdns_service_add("ESP32-WebServer", "_http", "_tcp", 8080, NULL, 0));
+    
 }
 
 /**
@@ -64,15 +65,13 @@ void cb_connection_ok(void *pvParameter){
 
     ESP_LOGI(TAG, "I have a connection and my IP is %s!", str_ip);
 
-    // 1. Start a Dedicated API Server on Port 8080 to avoid wifi_manager wildcard conflicts
+    // 1. Start a Dedicated API Server on Port 8080
     static httpd_handle_t api_server = NULL;
     if (api_server == NULL) {
         httpd_config_t config = HTTPD_DEFAULT_CONFIG();
         config.server_port = 8080;   // Custom API port
-        config.ctrl_port = 32769;    // MUST be different from wifi_manager (default 32768)
-        // config.max_open_sockets = 4;       // Limit max open sockets for this server
-        // config.lru_purge_enable = true;    // Automatically close oldest idle connection
-        
+        config.ctrl_port = 32769;    // Different from wifi_manager (32768)
+        //config.lru_purge_enable = true;
         ESP_LOGI(TAG, "Starting dedicated API server on port %d", config.server_port);
         if (httpd_start(&api_server, &config) == ESP_OK) {
             register_mqtt_http_routes(api_server);
@@ -81,7 +80,10 @@ void cb_connection_ok(void *pvParameter){
         }
     }
 
-    // 2. Start MQTT Cloud service when IP is acquired
+    // 2. Start mDNS Service so mobile app can discover port 8080
+    start_mdns_service();
+
+    // 3. Start MQTT Cloud service when IP is acquired
     mqtt_app_start();
 }
 
@@ -299,6 +301,19 @@ void detect_Task(void *arg)
     esp_task_wdt_delete(NULL);
     vTaskDelete(NULL);
 }
+// 1. Inform main.c about the REAL LED callback function
+extern void cb_wifi_connected(void *pvParameter);
+
+// 2. Create the unified Master Callback
+void master_got_ip_callback(void *pvParameter) {
+    ESP_LOGI(TAG, "Master GOT_IP Callback Triggered!");
+
+    // A. Fire the LED indicator logic (Turns LED Green for 5s)
+    cb_wifi_connected(pvParameter);
+
+    // B. Fire your API, mDNS, and MQTT logic (Starts Port 8080)
+    cb_connection_ok(pvParameter); 
+}
 void app_main()
 {
     // 1. Initialize NVS
@@ -308,16 +323,9 @@ void app_main()
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret); 
+
     // 2. Read saved voice recognition setting from NVS on boot
-    nvs_handle_t my_handle;
-    if (nvs_open("storage", NVS_READONLY, &my_handle) == ESP_OK) {
-        uint8_t voice_state = 1; // Default value (1 = ON)
-        if (nvs_get_u8(my_handle, "voice_enabled", &voice_state) == ESP_OK) {
-            g_voice_recognition_enabled = (voice_state == 1);
-            ESP_LOGI(TAG, "Loaded Voice Recognition State from NVS: %s", g_voice_recognition_enabled ? "ON" : "OFF");
-        }
-        nvs_close(my_handle);
-    }
+    load_voice_recognition_state();
 
     // Initialize esp_netif (required for Wi-Fi in IDF v5.x)
     ESP_ERROR_CHECK(esp_netif_init());
@@ -332,9 +340,18 @@ void app_main()
     led_init(); // Initialize built-in WS2812 Pixel LED
     led_set_off();
 
-    // Start Wi-Fi Manager AFTER NVS and netif are ready
     wifi_manager_start();
-    wifi_manager_set_callback(WM_EVENT_STA_GOT_IP, &cb_connection_ok);
+    // Wi-Fi status LED indications 
+    register_wifi_led_callbacks();
+    
+    wifi_manager_set_callback(WM_EVENT_STA_GOT_IP, &master_got_ip_callback);
+    //Register callback(8080 Port ) FIRST to prevent it from being wiped out from memset
+    //wifi_manager_set_callback(WM_EVENT_STA_GOT_IP, &cb_connection_ok);
+
+    // Start Wi-Fi Manager AFTER NVS and netif are ready
+
+    
+
 
     // Voice recognition models initialization
     models = esp_srmodel_init("model"); // partition label defined in partitions.csv

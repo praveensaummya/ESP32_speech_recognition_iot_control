@@ -3,6 +3,7 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/timers.h"
 #include "driver/gpio.h"
 #include "led_strip.h"
 
@@ -10,6 +11,10 @@
 #include "wake_up_prompt_tone.h"
 #include "speech_commands_action.h"
 #include "mqtt_server.h" 
+
+#include "wifi_manager.h"
+#include "esp_log.h"
+
 #define RELAY_1_GPIO GPIO_NUM_4
 #define RELAY_2_GPIO GPIO_NUM_5
 #define RELAY_3_GPIO GPIO_NUM_13
@@ -19,6 +24,8 @@
 #endif
 
 static led_strip_handle_t s_led_strip = NULL;
+static TimerHandle_t led_off_timer = NULL;
+static const char *TAG = "WIFI_LED_CB";
 
 // 1. Standalone Relay Initialization
 void relay_gpio_init(void)
@@ -36,7 +43,7 @@ void relay_gpio_init(void)
     gpio_set_level(RELAY_1_GPIO, 0);
     gpio_set_level(RELAY_2_GPIO, 0);
     gpio_set_level(RELAY_3_GPIO, 0);
-    printf("[RELAY] GPIO %d , GPIO %d , and GPIO %d initialized to OFF\n", RELAY_1_GPIO, RELAY_2_GPIO,RELAY_3_GPIO);
+    printf("[RELAY] GPIO %d , GPIO %d , and GPIO %d initialized to OFF\n", RELAY_1_GPIO, RELAY_2_GPIO, RELAY_3_GPIO);
 }
 
 // 2. Unified Relay Control Function (Drives HW & Cloud MQTT)
@@ -57,19 +64,16 @@ void set_relay_state(int relay_id, int state)
     gpio_set_level(pin, state ? 1 : 0);
     printf("[RELAY %d] -> %s\n", relay_id, state ? "ON" : "OFF");
 
-
-    if(relay_id == 1){
+    if (relay_id == 1) {
         gpio_set_level(RELAY_3_GPIO, state ? 1 : 0);
         printf("[RELAY 3] -> %s (Mirrored with Relay 1)\n", state ? "ON" : "OFF");
     }
-
-    
 
     // Publish state update to Cloud MQTT topic
     mqtt_publish_relay_status(relay_id, state);
 }
 
-// 3. Standalone LED Initialization (Removed hidden relay_gpio_init call)
+// 3. Standalone LED Initialization
 void led_init(void)
 {
     if (s_led_strip != NULL) {
@@ -119,6 +123,58 @@ void led_set_off(void)
     if (s_led_strip) {
         led_strip_clear(s_led_strip);
     }
+}
+
+/* Callback to turn off the Pixel LED after success timer expires */
+static void led_off_timer_cb(TimerHandle_t xTimer)
+{
+    ESP_LOGI(TAG, "Success timer expired. Turning off Pixel LED.");
+    led_set_off();
+}
+
+/* Triggered when connecting starts -> YELLOW / ORANGE */
+void cb_wifi_connecting(void *pvParameter)
+{
+    if (led_off_timer) xTimerStop(led_off_timer, 0);
+    ESP_LOGI(TAG, "Wi-Fi Connecting... Setting LED to Yellow");
+    led_set_color(255, 165, 0); 
+}
+
+/* Triggered when connection succeeds -> GREEN for 3 seconds, then OFF */
+void cb_wifi_connected(void *pvParameter)
+{
+    ESP_LOGI(TAG, "Wi-Fi Connected! Setting LED to Green for 5 seconds");
+    led_set_color(0, 255, 0); 
+
+    if (led_off_timer) {
+        xTimerStart(led_off_timer, 0);
+    }
+}
+
+/* Triggered when connection fails or disconnects -> RED */
+void cb_wifi_disconnected(void *pvParameter)
+{
+    if (led_off_timer) xTimerStop(led_off_timer, 0);
+    ESP_LOGI(TAG, "Wi-Fi Disconnected/Failed! Setting LED to Red");
+    led_set_color(255, 0, 0); 
+}
+
+/* Register callbacks & initialize the 3-second timer */
+void register_wifi_led_callbacks(void)
+{
+    if (led_off_timer == NULL) {
+        led_off_timer = xTimerCreate(
+            "led_off_tmr",
+            pdMS_TO_TICKS(5000), // 3 Seconds
+            pdFALSE,             // One-shot timer
+            (void*)0,
+            led_off_timer_cb
+        );
+    }
+
+    wifi_manager_set_callback(WM_ORDER_CONNECT_STA, &cb_wifi_connecting);
+    wifi_manager_set_callback(WM_EVENT_STA_GOT_IP, &cb_wifi_connected);
+    wifi_manager_set_callback(WM_EVENT_STA_DISCONNECTED, &cb_wifi_disconnected);
 }
 
 void wake_up_action(void)
