@@ -205,7 +205,7 @@ void detect_Task(void *arg)
     int mu_chunksize = multinet->get_samp_chunksize(model_data);
 
     assert(mu_chunksize == afe_chunksize);
-
+//---------------------------------------------------Speech cmds-------------------------------------
     esp_mn_commands_clear();
     esp_mn_commands_add(1, "inverter on");
     esp_mn_commands_add(2, "inverter off");
