@@ -20,9 +20,9 @@
 #define NVS_KEY_VOICE_EN   "voice_enabled"
 
 // Default fallback values
-#define DEFAULT_BROKER_URI  ""
-#define DEFAULT_BROKER_USER ""
-#define DEFAULT_BROKER_PASS ""
+#define DEFAULT_BROKER_URI  "mqtts://32eefc175478407f9a22c17d045a99ed.s1.eu.hivemq.cloud"
+#define DEFAULT_BROKER_USER "praveen"
+#define DEFAULT_BROKER_PASS "#abcd0000"
 
 static const char *TAG = "MQTT_CLIENT";
 static esp_mqtt_client_handle_t s_mqtt_client = NULL;

@@ -19,6 +19,13 @@
 #define RELAY_2_GPIO GPIO_NUM_5
 #define RELAY_3_GPIO GPIO_NUM_13
 
+// #define FUNC_I2S_EN         (1)
+// #define GPIO_I2S_LRCK       (GPIO_NUM_42)  // WS
+// #define GPIO_I2S_MCLK       (GPIO_NUM_NC)  // Not used
+// #define GPIO_I2S_SCLK       (GPIO_NUM_41)  // SCK
+// #define GPIO_I2S_SDIN       (GPIO_NUM_2)   // SD (data in)
+// #define GPIO_I2S_DOUT       (GPIO_NUM_NC)  // No speaker output
+
 #ifndef BUILTIN_PIXEL_LED_GPIO
 #define BUILTIN_PIXEL_LED_GPIO 48
 #endif
@@ -165,7 +172,7 @@ void register_wifi_led_callbacks(void)
     if (led_off_timer == NULL) {
         led_off_timer = xTimerCreate(
             "led_off_tmr",
-            pdMS_TO_TICKS(5000), // 3 Seconds
+            pdMS_TO_TICKS(6000), // 6 Seconds
             pdFALSE,             // One-shot timer
             (void*)0,
             led_off_timer_cb
