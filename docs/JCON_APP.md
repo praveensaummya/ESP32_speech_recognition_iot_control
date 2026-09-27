@@ -10,6 +10,9 @@ CORS behaviour, and troubleshooting.
 > Prebuilt release APKs are attached to that repo's
 > [Releases page](https://github.com/praveensaummya/jcon/releases) (built
 > automatically by CI — see `.github/workflows/release.yml` there).
+> Latest release:
+> **[jcon-v1.0.0.apk](https://github.com/praveensaummya/jcon/releases/download/v1.0.0/jcon-v1.0.0.apk)**
+> — [v1.0.0 release notes](https://github.com/praveensaummya/jcon/releases/tag/v1.0.0)
 
 **Firmware-side code:** `main/mqtt_server.c` (all routes + CORS),
 `main/main.c` (server startup + mDNS), `main/include/app_config.h`
