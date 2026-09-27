@@ -1,3 +1,7 @@
 managed_components
 build
 
+# Local credentials — template is main/secrets.h.example
+main/secrets.h
+
+

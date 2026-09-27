@@ -4,26 +4,38 @@
 #include <string.h>
 #include "esp_log.h"
 #include "mqtt_client.h"
-#include "esp_crt_bundle.h"         
+#include "esp_crt_bundle.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "cJSON.h"
 
-// NVS Namespaces & Keys for MQTT
-#define NVS_NAMESPACE       "mqtt_config"
-#define NVS_KEY_URI         "broker_uri"
-#define NVS_KEY_USER        "broker_user"
-#define NVS_KEY_PASS        "broker_pass"
+#include "app_config.h" // Central documented config: NVS keys, MQTT topics, QoS
 
-// NVS Namespaces & Keys for Voice Control (Matched across system)
-#define NVS_VOICE_NAMESPACE "voice_cfg"
-#define NVS_KEY_VOICE_EN   "voice_enabled"
+// ---------------------------------------------------------------------------
+// Local, git-ignored broker credentials (template: main/secrets.h.example).
+// Each developer copies the template to main/secrets.h and fills in their
+// own credentials; .gitignore keeps that file out of version control.
+// A fresh clone WITHOUT secrets.h still compiles: placeholder creds are
+// used and MQTT stays disconnected until real credentials are saved to the
+// device with POST /api/config/mqtt (persisted to NVS).
+// ---------------------------------------------------------------------------
+#if __has_include("secrets.h")
+#include "secrets.h"
+#else
+#warning "main/secrets.h missing - copy main/secrets.h.example and add your broker credentials (MQTT will not connect until configured via POST /api/config/mqtt)."
+#define MQTT_DEFAULT_BROKER_URI    "mqtts://CHANGE-ME.example.invalid"
+#define MQTT_DEFAULT_BROKER_USER   "CHANGE-ME"
+#define MQTT_DEFAULT_BROKER_PASS   "CHANGE-ME"
+#endif
 
-// Default fallback values
-#define DEFAULT_BROKER_URI  "mqtts://32eefc175478407f9a22c17d045a99ed.s1.eu.hivemq.cloud"
-#define DEFAULT_BROKER_USER "praveen"
-#define DEFAULT_BROKER_PASS "#abcd0000"
-
+/**
+ * @file mqtt_server.c
+ * @brief MQTT cloud client + REST API routes (relay control, MQTT config,
+ *        voice-recognition toggle, reachability ping).
+ *
+ * Broker settings live in NVS namespace NVS_NAMESPACE_MQTT; the values in
+ * secrets.h are only compile-time fallbacks used when NVS has no entry.
+ */
 static const char *TAG = "MQTT_CLIENT";
 static esp_mqtt_client_handle_t s_mqtt_client = NULL;
 
@@ -56,8 +68,8 @@ void load_voice_recognition_state(void)
 {
     nvs_handle_t nvs_h;
     uint8_t enabled = 1; // Default to ON (1)
-    if (nvs_open(NVS_VOICE_NAMESPACE, NVS_READONLY, &nvs_h) == ESP_OK) {
-        if (nvs_get_u8(nvs_h, NVS_KEY_VOICE_EN, &enabled) == ESP_OK) {
+    if (nvs_open(NVS_NAMESPACE_VOICE, NVS_READONLY, &nvs_h) == ESP_OK) {
+        if (nvs_get_u8(nvs_h, NVS_KEY_VOICE_ENABLED, &enabled) == ESP_OK) {
             ESP_LOGI(TAG, "Loaded Voice Recognition State from NVS: %s", enabled ? "ON" : "OFF");
         }
         nvs_close(nvs_h);
@@ -70,8 +82,8 @@ void load_voice_recognition_state(void)
 void save_voice_recognition_state(bool enabled)
 {
     nvs_handle_t nvs_h;
-    if (nvs_open(NVS_VOICE_NAMESPACE, NVS_READWRITE, &nvs_h) == ESP_OK) {
-        nvs_set_u8(nvs_h, NVS_KEY_VOICE_EN, enabled ? 1 : 0);
+    if (nvs_open(NVS_NAMESPACE_VOICE, NVS_READWRITE, &nvs_h) == ESP_OK) {
+        nvs_set_u8(nvs_h, NVS_KEY_VOICE_ENABLED, enabled ? 1 : 0);
         nvs_commit(nvs_h);
         nvs_close(nvs_h);
         ESP_LOGI(TAG, "Saved Voice Recognition State to NVS: %s", enabled ? "ON" : "OFF");
@@ -85,27 +97,27 @@ esp_err_t mqtt_get_config(char *uri_buf, size_t uri_len,
                         char *pass_buf, size_t pass_len)
 {
     nvs_handle_t nvs_h;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs_h);
+    esp_err_t err = nvs_open(NVS_NAMESPACE_MQTT, NVS_READONLY, &nvs_h);
     if (err != ESP_OK) {
-        snprintf(uri_buf, uri_len, "%s", DEFAULT_BROKER_URI);
-        snprintf(user_buf, user_len, "%s", DEFAULT_BROKER_USER);
-        snprintf(pass_buf, pass_len, "%s", DEFAULT_BROKER_PASS);
+        snprintf(uri_buf, uri_len, "%s", MQTT_DEFAULT_BROKER_URI);
+        snprintf(user_buf, user_len, "%s", MQTT_DEFAULT_BROKER_USER);
+        snprintf(pass_buf, pass_len, "%s", MQTT_DEFAULT_BROKER_PASS);
         return ESP_OK;
     }
 
     size_t req_len = uri_len;
-    if (nvs_get_str(nvs_h, NVS_KEY_URI, uri_buf, &req_len) != ESP_OK || strlen(uri_buf) == 0) {
-        snprintf(uri_buf, uri_len, "%s", DEFAULT_BROKER_URI);
+    if (nvs_get_str(nvs_h, NVS_KEY_MQTT_URI, uri_buf, &req_len) != ESP_OK || strlen(uri_buf) == 0) {
+        snprintf(uri_buf, uri_len, "%s", MQTT_DEFAULT_BROKER_URI);
     }
 
     req_len = user_len;
-    if (nvs_get_str(nvs_h, NVS_KEY_USER, user_buf, &req_len) != ESP_OK) {
-        snprintf(user_buf, user_len, "%s", DEFAULT_BROKER_USER);
+    if (nvs_get_str(nvs_h, NVS_KEY_MQTT_USER, user_buf, &req_len) != ESP_OK) {
+        snprintf(user_buf, user_len, "%s", MQTT_DEFAULT_BROKER_USER);
     }
 
     req_len = pass_len;
-    if (nvs_get_str(nvs_h, NVS_KEY_PASS, pass_buf, &req_len) != ESP_OK) {
-        snprintf(pass_buf, pass_len, "%s", DEFAULT_BROKER_PASS);
+    if (nvs_get_str(nvs_h, NVS_KEY_MQTT_PASS, pass_buf, &req_len) != ESP_OK) {
+        snprintf(pass_buf, pass_len, "%s", MQTT_DEFAULT_BROKER_PASS);
     }
 
     nvs_close(nvs_h);
@@ -115,15 +127,15 @@ esp_err_t mqtt_get_config(char *uri_buf, size_t uri_len,
 esp_err_t mqtt_save_config(const char *uri, const char *user, const char *pass)
 {
     nvs_handle_t nvs_h;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_h);
+    esp_err_t err = nvs_open(NVS_NAMESPACE_MQTT, NVS_READWRITE, &nvs_h);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to open NVS namespace: %s", esp_err_to_name(err));
         return err;
     }
 
-    if (uri)  nvs_set_str(nvs_h, NVS_KEY_URI, uri);
-    if (user) nvs_set_str(nvs_h, NVS_KEY_USER, user);
-    if (pass) nvs_set_str(nvs_h, NVS_KEY_PASS, pass);
+    if (uri)  nvs_set_str(nvs_h, NVS_KEY_MQTT_URI, uri);
+    if (user) nvs_set_str(nvs_h, NVS_KEY_MQTT_USER, user);
+    if (pass) nvs_set_str(nvs_h, NVS_KEY_MQTT_PASS, pass);
 
     err = nvs_commit(nvs_h);
     if (err == ESP_OK) {
@@ -139,7 +151,7 @@ esp_err_t mqtt_save_config(const char *uri, const char *user, const char *pass)
 esp_err_t mqtt_clear_config(void)
 {
     nvs_handle_t nvs_h;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_h);
+    esp_err_t err = nvs_open(NVS_NAMESPACE_MQTT, NVS_READWRITE, &nvs_h);
     if (err == ESP_OK) {
         err = nvs_erase_all(nvs_h);
         if (err == ESP_OK) {
@@ -164,7 +176,7 @@ void mqtt_publish_relay_status(int relay_id, int state)
     if (s_mqtt_client != NULL) {
         char status_json[64];
         snprintf(status_json, sizeof(status_json), "{\"relay\":%d,\"state\":%d}", relay_id, state ? 1 : 0);
-        esp_mqtt_client_publish(s_mqtt_client, "device/relays/status", status_json, 0, 1, 0);
+        esp_mqtt_client_publish(s_mqtt_client, MQTT_TOPIC_RELAY_STATUS, status_json, 0, MQTT_QOS, 0);
         ESP_LOGI(TAG, "Published status: %s", status_json);
     }
 }
@@ -174,7 +186,7 @@ void mqtt_publish_voice_status(bool enabled)
     if (s_mqtt_client != NULL) {
         char status_json[64];
         snprintf(status_json, sizeof(status_json), "{\"voice_enabled\":%s}", enabled ? "true" : "false");
-        esp_mqtt_client_publish(s_mqtt_client, "device/voice/status", status_json, 0, 1, 0);
+        esp_mqtt_client_publish(s_mqtt_client, MQTT_TOPIC_VOICE_STATUS, status_json, 0, MQTT_QOS, 0);
         ESP_LOGI(TAG, "Published Voice Status to MQTT: %s", status_json);
     }
 }
@@ -186,8 +198,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     switch ((esp_mqtt_event_id_t)event_id) {
         case MQTT_EVENT_CONNECTED:
             ESP_LOGI(TAG, "Connected to MQTT Cloud Broker!");
-            esp_mqtt_client_subscribe(event->client, "device/relays/command", 1);
-            esp_mqtt_client_subscribe(event->client, "device/voice/command", 1);
+            esp_mqtt_client_subscribe(event->client, MQTT_TOPIC_RELAY_COMMAND, MQTT_QOS);
+            esp_mqtt_client_subscribe(event->client, MQTT_TOPIC_VOICE_COMMAND, MQTT_QOS);
             break;
 
         case MQTT_EVENT_DISCONNECTED:
@@ -420,14 +432,19 @@ static esp_err_t voice_status_get_handler(httpd_req_t *req)
 // ==========================================
 
 // GET /api/status - reachability ping used by the JCON mobile app
-// (_checkDeviceReachability() calls http://<ip>:8080/api/status and expects HTTP 200)
+// (_checkDeviceReachability() calls http://<ip>:8080/api/status and expects HTTP 200.
+//  Full app integration guide: docs/JCON_APP.md)
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
     set_cors_headers(req);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Connection", "close"); // Prevents ESP32 socket leak (matches app header)
-    const char *resp_str =
-        "{\"status\":\"online\",\"device\":\"ESP32-S3 Inverter\",\"port\":8080}";
+    // The body advertises the API port so the app can pick up a changed
+    // APP_HTTP_API_PORT without a firmware-specific update.
+    char resp_str[96];
+    snprintf(resp_str, sizeof(resp_str),
+             "{\"status\":\"online\",\"device\":\"ESP32-S3 Inverter\",\"port\":%d}",
+             APP_HTTP_API_PORT);
     httpd_resp_send(req, resp_str, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }

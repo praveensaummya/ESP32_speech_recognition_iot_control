@@ -10,31 +10,37 @@
 #include "esp_board_init.h"
 #include "wake_up_prompt_tone.h"
 #include "speech_commands_action.h"
-#include "mqtt_server.h" 
+#include "mqtt_server.h"
 
 #include "wifi_manager.h"
 #include "esp_log.h"
+#include "app_config.h" // Relay GPIOs, LED GPIO/colours/timer, wake word
 
-#define RELAY_1_GPIO GPIO_NUM_4
-#define RELAY_2_GPIO GPIO_NUM_5
-#define RELAY_3_GPIO GPIO_NUM_13
-
-// #define FUNC_I2S_EN         (1)
-// #define GPIO_I2S_LRCK       (GPIO_NUM_42)  // WS
-// #define GPIO_I2S_MCLK       (GPIO_NUM_NC)  // Not used
-// #define GPIO_I2S_SCLK       (GPIO_NUM_41)  // SCK
-// #define GPIO_I2S_SDIN       (GPIO_NUM_2)   // SD (data in)
-// #define GPIO_I2S_DOUT       (GPIO_NUM_NC)  // No speaker output
-
-#ifndef BUILTIN_PIXEL_LED_GPIO
-#define BUILTIN_PIXEL_LED_GPIO 48
-#endif
+/**
+ * @file speech_commands_action.c
+ * @brief Hardware side-effects: relay GPIO driving, WS2812 status LED
+ *        patterns, Wi-Fi LED callbacks, and voice command -> action mapping.
+ */
 
 static led_strip_handle_t s_led_strip = NULL;
 static TimerHandle_t led_off_timer = NULL;
 static const char *TAG = "WIFI_LED_CB";
 
-// 1. Standalone Relay Initialization
+// Status LED colours (R, G, B). Cheat-sheet also documented in app_config.h:
+//   ORANGE = Wi-Fi connecting, GREEN = connected (auto-off after
+//   WIFI_LED_SUCCESS_ON_TIME_MS), RED = disconnected/failed,
+//   BLUE = wake word detected (device listening).
+#define LED_COLOR_CONNECTING   255, 165, 0
+#define LED_COLOR_CONNECTED      0, 255, 0
+#define LED_COLOR_DISCONNECT   255,   0, 0
+#define LED_COLOR_WAKE           0,   0, 100
+
+/**
+ * @brief Configures the relay GPIOs as outputs and drives them OFF at boot.
+ *
+ * Pull-down is enabled so the relays cannot float ON while the ESP boots.
+ * Relay 3 mirrors Relay 1 in set_relay_state(); mapping in app_config.h.
+ */
 void relay_gpio_init(void)
 {
     gpio_config_t io_conf = {
@@ -53,7 +59,12 @@ void relay_gpio_init(void)
     printf("[RELAY] GPIO %d , GPIO %d , and GPIO %d initialized to OFF\n", RELAY_1_GPIO, RELAY_2_GPIO, RELAY_3_GPIO);
 }
 
-// 2. Unified Relay Control Function (Drives HW & Cloud MQTT)
+/**
+ * @brief Sets a relay ON/OFF: drives the GPIO and publishes state to MQTT.
+ *
+ * @param relay_id Relay number: 1 or 2 (Relay 3 mirrors Relay 1, no own ID).
+ * @param state    1 = ON (relay energised), 0 = OFF.
+ */
 void set_relay_state(int relay_id, int state)
 {
     gpio_num_t pin;
@@ -80,7 +91,9 @@ void set_relay_state(int relay_id, int state)
     mqtt_publish_relay_status(relay_id, state);
 }
 
-// 3. Standalone LED Initialization
+/**
+ * @brief Initialises the single on-board WS2812 LED (idempotent).
+ */
 void led_init(void)
 {
     if (s_led_strip != NULL) {
@@ -107,6 +120,7 @@ void led_init(void)
     }
 }
 
+/** @brief Sets the LED to a raw R/G/B colour (no-op if not initialised). */
 void led_set_color(uint8_t red, uint8_t green, uint8_t blue)
 {
     if (s_led_strip) {
@@ -115,16 +129,19 @@ void led_set_color(uint8_t red, uint8_t green, uint8_t blue)
     }
 }
 
+/** @brief LED BLUE: wake word detected, device is listening for a command. */
 void led_set_blue(void)
 {
-    led_set_color(0, 0, 100);
+    led_set_color(LED_COLOR_WAKE);
 }
 
+/** @brief LED GREEN: Wi-Fi connected (auto-off timer applies). */
 void led_set_green(void)
 {
-    led_set_color(0, 100, 0);
+    led_set_color(LED_COLOR_CONNECTED);
 }
 
+/** @brief LED off: idle state. */
 void led_set_off(void)
 {
     if (s_led_strip) {
@@ -139,40 +156,40 @@ static void led_off_timer_cb(TimerHandle_t xTimer)
     led_set_off();
 }
 
-/* Triggered when connecting starts -> YELLOW / ORANGE */
+/* Wi-Fi connecting in progress -> ORANGE */
 void cb_wifi_connecting(void *pvParameter)
 {
     if (led_off_timer) xTimerStop(led_off_timer, 0);
-    ESP_LOGI(TAG, "Wi-Fi Connecting... Setting LED to Yellow");
-    led_set_color(255, 165, 0); 
+    ESP_LOGI(TAG, "Wi-Fi Connecting... Setting LED to Orange");
+    led_set_color(LED_COLOR_CONNECTING);
 }
 
-/* Triggered when connection succeeds -> GREEN for 3 seconds, then OFF */
+/* Wi-Fi connected -> GREEN, then off after WIFI_LED_SUCCESS_ON_TIME_MS */
 void cb_wifi_connected(void *pvParameter)
 {
-    ESP_LOGI(TAG, "Wi-Fi Connected! Setting LED to Green for 5 seconds");
-    led_set_color(0, 255, 0); 
+    ESP_LOGI(TAG, "Wi-Fi Connected! LED green for %d ms", (int)WIFI_LED_SUCCESS_ON_TIME_MS);
+    led_set_color(LED_COLOR_CONNECTED);
 
     if (led_off_timer) {
         xTimerStart(led_off_timer, 0);
     }
 }
 
-/* Triggered when connection fails or disconnects -> RED */
+/* Wi-Fi connection failed or dropped -> RED */
 void cb_wifi_disconnected(void *pvParameter)
 {
     if (led_off_timer) xTimerStop(led_off_timer, 0);
     ESP_LOGI(TAG, "Wi-Fi Disconnected/Failed! Setting LED to Red");
-    led_set_color(255, 0, 0); 
+    led_set_color(LED_COLOR_DISCONNECT);
 }
 
-/* Register callbacks & initialize the 3-second timer */
+/* Registers Wi-Fi state LED callbacks and creates the one-shot LED-off timer. */
 void register_wifi_led_callbacks(void)
 {
     if (led_off_timer == NULL) {
         led_off_timer = xTimerCreate(
             "led_off_tmr",
-            pdMS_TO_TICKS(6000), // 6 Seconds
+            pdMS_TO_TICKS(WIFI_LED_SUCCESS_ON_TIME_MS), // one-shot: LED off after success period
             pdFALSE,             // One-shot timer
             (void*)0,
             led_off_timer_cb
@@ -184,31 +201,38 @@ void register_wifi_led_callbacks(void)
     wifi_manager_set_callback(WM_EVENT_STA_DISCONNECTED, &cb_wifi_disconnected);
 }
 
+/**
+ * @brief Wake-word reaction: log line + LED turns BLUE to show the device
+ *        is now listening for a voice command.
+ */
 void wake_up_action(void)
 {
-    printf("[WAKE] 'HI ESP' detected -> Pixel LED turning BLUE!\n");
+    printf("[WAKE] '%s' detected -> Pixel LED turning BLUE!\n", WAKE_WORD_PHRASE);
     led_set_blue();
 }
 
-// 4. Voice Command Handler
+/**
+ * @brief Maps a recognised voice command ID to an action.
+ *
+ * The ID -> phrase mapping is registered in detect_Task() (main.c) and
+ * documented in app_config.h. Keep all three in sync when adding commands.
+ *
+ * @param command_id MultiNet command ID (see VOICE_CMD_* in app_config.h).
+ */
 void speech_commands_action(int command_id)
 {
     switch (command_id) {
-        case 1:
-            set_relay_state(1, 1); // Relay 1 ON
-            printf("[RELAY 1]  ON\n");
+        case VOICE_CMD_INVERTER_ON:   // "inverter on"
+            set_relay_state(1, 1);
             break;
-        case 2:
-            set_relay_state(1, 0); // Relay 1 OFF
-            printf("[RELAY 1]  OFF\n");
+        case VOICE_CMD_INVERTER_OFF:  // "inverter off"
+            set_relay_state(1, 0);
             break;
-        case 3:
-            set_relay_state(2, 1); // Relay 2 ON
-            printf("[RELAY 2]  ON\n");
+        case VOICE_CMD_RELAY2_ON:
+            set_relay_state(2, 1);
             break;
-        case 4:
-            set_relay_state(2, 0); // Relay 2 OFF
-            printf("[RELAY 2]  OFF\n");
+        case VOICE_CMD_RELAY2_OFF:
+            set_relay_state(2, 0);
             break;
         default:
             printf("[COMMAND] No action mapped for ID %d\n", command_id);

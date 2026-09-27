@@ -1,3 +1,19 @@
+/**
+ * @file main.c
+ * @brief Application entry point: Wi-Fi manager, mDNS, HTTP API server,
+ *        MQTT cloud client, and the wake-word / command-detection pipeline.
+ *
+ * Boot flow (app_main):
+ *   NVS init -> load voice on/off state -> netif/event loop -> relay GPIOs
+ *   -> status LED -> wifi_manager (captive portal) -> register GOT_IP
+ *   callback -> speech-recognition model init -> feed/detect tasks.
+ *
+ * On Wi-Fi GOT_IP, master_got_ip_callback() fans out to:
+ *   A. cb_wifi_connected()  - status LED green (colour cheat-sheet in
+ *                             app_config.h)
+ *   B. cb_connection_ok()   - HTTP API server on APP_HTTP_API_PORT,
+ *                             mDNS advertise, MQTT cloud client start.
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -28,6 +44,7 @@
 #include "wifi_manager.h"
 #include "cpu_monitor.h"
 #include "mqtt_server.h"
+#include "app_config.h" // Central documented config (ports, GPIOs, timeouts)
 
 #include "mdns.h"
 
@@ -58,13 +75,14 @@ void start_mdns_service(void) {
         return;
     }
 
-    // Hostname must match what the mobile app resolves: http://<hostname>.local:8080
-    // The JCON app discovers the device as "esp32-inverter.local" via mDNS.
-    mdns_hostname_set("esp32-inverter");
-    mdns_instance_name_set("ESP32-S3 Smart Inverter Controller");
-    ESP_LOGI("MDNS", "mDNS hostname set to http://esp32-inverter.local:8080");
+    // Hostname must match what the mobile app resolves. It discovers the
+    // device as "<APP_MDNS_HOSTNAME>.local" and talks to APP_HTTP_API_PORT.
+    // Both values live in app_config.h - keep them in sync with the app.
+    mdns_hostname_set(APP_MDNS_HOSTNAME);
+    mdns_instance_name_set(APP_MDNS_INSTANCE_NAME);
+    ESP_LOGI("MDNS", "mDNS hostname set to http://%s.local:%d", APP_MDNS_HOSTNAME, APP_HTTP_API_PORT);
 
-    err = mdns_service_add("ESP32-WebServer", "_http", "_tcp", 8080, NULL, 0);
+    err = mdns_service_add(APP_MDNS_SERVICE_NAME, APP_MDNS_SERVICE_TYPE, APP_MDNS_SERVICE_PROTO, APP_MDNS_SERVICE_PORT, NULL, 0);
     if (err == ESP_OK) {
         s_mdns_started = true;
     } else if (err == ESP_ERR_INVALID_ARG || err == ESP_ERR_NO_MEM) {
@@ -90,14 +108,14 @@ void cb_connection_ok(void *pvParameter){
     static httpd_handle_t api_server = NULL;
     if (api_server == NULL) {
         httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-        config.server_port = 8080;   // Custom API port
-        config.ctrl_port = 32769;    // Different from wifi_manager (32768)
+        config.server_port = APP_HTTP_API_PORT; // REST API port (mobile app target, see app_config.h)
+        config.ctrl_port = APP_HTTP_CTRL_PORT;  // Must differ from wifi_manager's 32768
         //config.lru_purge_enable = true;
         ESP_LOGI(TAG, "Starting dedicated API server on port %d", config.server_port);
         if (httpd_start(&api_server, &config) == ESP_OK) {
             register_mqtt_http_routes(api_server);
         } else {
-            ESP_LOGE(TAG, "Failed to start API server on port 8080");
+            ESP_LOGE(TAG, "Failed to start API server on port %d", APP_HTTP_API_PORT);
         }
     }
 
@@ -201,14 +219,18 @@ void detect_Task(void *arg)
     fflush(stdout);
 
     esp_mn_iface_t *multinet = esp_mn_handle_from_name(mn_name);
-    model_iface_data_t *model_data = multinet->create(mn_name, 6000);
+    // Second arg = how long (ms) MultiNet keeps listening for a command
+    // after the wake word before timing out (MULTINET_COMMAND_TIMEOUT_MS).
+    model_iface_data_t *model_data = multinet->create(mn_name, MULTINET_COMMAND_TIMEOUT_MS);
     int mu_chunksize = multinet->get_samp_chunksize(model_data);
 
     assert(mu_chunksize == afe_chunksize);
 //---------------------------------------------------Speech cmds-------------------------------------
+// IDs registered here MUST match the cases in speech_commands_action() and
+// the ID->phrase map documented in app_config.h (VOICE_CMD_* enum).
     esp_mn_commands_clear();
-    esp_mn_commands_add(1, "inverter on");
-    esp_mn_commands_add(2, "inverter off");
+    esp_mn_commands_add(VOICE_CMD_INVERTER_ON,  "inverter on");
+    esp_mn_commands_add(VOICE_CMD_INVERTER_OFF, "inverter off");
     esp_mn_commands_update();
 
     multinet->print_active_speech_commands(model_data);
@@ -247,7 +269,7 @@ void detect_Task(void *arg)
 
         // 1. WAKEWORD DETECTED
         if (res->wakeup_state == WAKENET_DETECTED) {
-            printf("WAKEWORD DETECTED: HI ESP\n");
+            printf("WAKEWORD DETECTED: %s\n", WAKE_WORD_PHRASE);
             fflush(stdout);
 
             afe_handle->disable_wakenet(afe_data);
@@ -275,10 +297,11 @@ void detect_Task(void *arg)
                 }
 
                 if (mn_result->num > 0) {
-                    if (mn_result->prob[0] >= 0.12f) {
+                    if (mn_result->prob[0] >= MIN_COMMAND_CONFIDENCE) {
                         speech_commands_action(mn_result->command_id[0]);
                     } else {
-                        printf("[IGNORED] Low confidence detection (prob:%f < 0.12)\n", mn_result->prob[0]);
+                        printf("[IGNORED] Low confidence detection (prob:%f < %f)\n",
+                               mn_result->prob[0], (double)MIN_COMMAND_CONFIDENCE);
                     }
                 }
 
@@ -286,7 +309,7 @@ void detect_Task(void *arg)
                 afe_handle->enable_wakenet(afe_data);
                 wakeup_flag = 0;
 
-                // Reset LED back to idle / green state
+                // Reset LED to idle (off) - wake word turns it blue again
                 led_set_off();
 
                 printf("\n-----------awaits to be waken up-----------\n");
